@@ -72,25 +72,48 @@ for (let beat = 0; beat < 16; beat++) {
 }
 const smf = concat([mthd(480, 1), track(T)]);
 
-// CASM with one CSEG: sections "Main A,Fill In AA" and channels 10/11 named.
-// The chunk shape follows the real exports: a bare MThd performance followed by
-// a CASM sibling chunk, not an SFF container.
+// CASM with two CSEG groups: Main A with both parts, Main B with the bass only.
+// A voice record is 55 bytes - a 7-byte "Ctb2" tag, 0x2F, the channel, an 8-byte
+// padded name, then 38 parameter bytes whose first byte is the channel again -
+// and the CASM channel number is the same zero-based number the notes use. The
+// fixture is built to that shape so it exercises the same reader as a real style.
 function name8(s) { return Uint8Array.from([...s.padEnd(8, ' ')].map((c) => c.charCodeAt(0))); }
-const secText = 'Main A,Fill In AA';
-// Sdec body: the name text, then padding up to the declared length.
-const secBody = concat([Uint8Array.from([...secText].map((c) => c.charCodeAt(0))), Uint8Array.from([0, 0, 0, 0])]);
-const sdec = chunk('Sdec', secBody);
-// CASM wraps CSEG groups, and each CSEG holds the Sdec plus the channel entries.
-const csegBody = concat([
-  sdec,
-  // The CASM channel byte is one-based and lands on the same zero-based channel
-  // the notes use: byte 10 -> 0-based 9, which is what 0x99 (channel 10
-  // one-based) plays on. The bass part is therefore byte 12, not 11.
-  Uint8Array.from([0x2f, 10, ...name8('MainDrum')]),
-  Uint8Array.from([0x2f, 12, ...name8('Bass')]),
+function voiceRecord(channel, name, fill = 0) {
+  const out = new Uint8Array(55);
+  const tag = [...'Ctb2'].map((c) => c.charCodeAt(0));
+  out.set(tag, 0);
+  out[7] = 0x2f;
+  out[8] = channel;
+  out.set(name8(name), 9);
+  out.fill(fill, 17);
+  out[17] = channel;      // the parameter block restates the channel
+  out[18] = 0x0f;
+  out[19] = 0xff;
+  return out;
+}
+function cseg(sectionName, records) {
+  const text = Uint8Array.from([...sectionName].map((c) => c.charCodeAt(0)));
+  const body = new Uint8Array(8 + text.length + records.length * 55);
+  body[0] = 0x53; body[1] = 0x64; body[2] = 0x65; body[3] = 0x63; // "Sdec"
+  new DataView(body.buffer).setUint32(4, text.length);
+  body.set(text, 8);
+  let p = 8 + text.length;
+  for (const r of records) { body.set(r, p); p += 55; }
+  return chunk('CSEG', body);
+}
+function casmOf(groups) {
+  const body = new Uint8Array(groups.reduce((a, g) => a + g.length, 0));
+  let p = 0;
+  for (const g of groups) { body.set(g, p); p += g.length; }
+  return chunk('CASM', body);
+}
+
+// Channel 10 one-based is 0-based 9, which is what 0x99 plays on, and the bass on
+// 0x9b is 0-based 11. The CASM channel byte uses those same numbers.
+const casmChunk = casmOf([
+  cseg('Main A', [voiceRecord(9, 'MainDrum', 0x20), voiceRecord(11, 'Bass', 0x40)]),
+  cseg('Main B', [voiceRecord(9, 'MainDrum', 0x20)]),
 ]);
-const casmBody = chunk('CSEG', csegBody);
-const casmChunk = chunk('CASM', casmBody);
 const sty = concat([smf, casmChunk]);
 const styPath = join(OUT, 'inspect.sty');
 const { writeFileSync, readFileSync } = await import('node:fs');
@@ -164,7 +187,7 @@ check('block detection is labelled as inferred', /inferred/i.test(await page.loc
 
 // Declared sections
 const decl = await page.locator('.decl-tag').allTextContents();
-check('declared sections are listed', decl.some((t) => /Main A/.test(t)) && decl.some((t) => /Fill In AA/.test(t)), decl.join(' | '));
+check('declared sections are listed', decl.some((t) => /Main A/.test(t)) && decl.some((t) => /Main B/.test(t)), decl.join(' | '));
 check('an explicit caveat explains sections are not separable', /cannot be split per section/i.test(await page.locator('#blockDeclared').innerText()));
 
 // Pitch range

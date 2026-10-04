@@ -114,14 +114,18 @@ export function parseCasm(view, casmOffset, casmLength) {
       // A channel entry: 0x2F, the channel number, then a padded 8-byte name.
       if (view.getUint8(q) === 0x2f) {
         const ch = view.getUint8(q + 1);
-        if (ch >= 1 && ch <= 16) {
+        // The channel byte is the same zero-based number the MIDI events use. A
+        // style whose parts sit on channels 9-15 one-based declares 9-15 here, and
+        // subtracting one shifted every part name onto the wrong channel - which
+        // then either failed to match its notes or matched a neighbour's.
+        if (ch >= 0 && ch <= 15) {
           let raw = '';
           for (const b of new Uint8Array(view.buffer, view.byteOffset + q + 2, 8)) {
             raw += String.fromCharCode(b);
           }
           const name = raw.replace(/\s+$/g, '').trim();
           if (name) {
-            const voice = { channel: ch - 1, name, family: voiceFamily(name) };
+            const voice = { channel: ch, name, family: voiceFamily(name) };
             groupVoices.push(voice);
             if (!voices.some((v) => v.channel === voice.channel && v.name === voice.name)) {
               voices.push(voice);

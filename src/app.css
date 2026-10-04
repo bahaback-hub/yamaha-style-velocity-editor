@@ -200,6 +200,74 @@ output { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 15
 
 .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
 
+/* ---- the variation map ------------------------------------------------------
+   A grid of dots rather than a table of checkboxes. The thing being read at a
+   glance is the shape - which rows have gaps, which columns stop early - and a
+   grid of small filled circles carries that; a column of ticked boxes does not.
+   The row is a grid so a variation with a different number of parts cannot push
+   its columns out of line with the rows above it. */
+
+.block-map { margin-top: 22px; }
+.map-legend { margin: -4px 0 12px; line-height: 1.6; max-width: 68ch; }
+
+.map { overflow-x: auto; padding-bottom: 4px; }
+
+.map-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 132px) repeat(var(--cols, 1), minmax(58px, 1fr)) auto;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.map-row:last-child { border-bottom: 0; }
+
+.map-head {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.map-head .map-col {
+  font-size: 10px; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--dim); text-align: center; padding: 8px 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* A channel named differently in different variations is worth marking: its
+   column does not describe one part. */
+.map-head .map-col.multi { color: var(--accent); }
+
+.map-name {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 10px 7px 2px; min-width: 0;
+}
+.map-name span { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.map-name em { font-size: 11px; color: var(--dim); font-style: normal; }
+
+.map-col { display: grid; place-items: center; padding: 4px 0; }
+
+.map-dot {
+  width: 22px; height: 22px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--line); background: transparent;
+  cursor: pointer; transition: background 90ms, border-color 90ms, transform 90ms;
+}
+.map-dot:hover:not(:disabled) { border-color: var(--muted); transform: scale(1.12); }
+.map-dot.on { background: var(--accent); border-color: var(--accent); }
+.map-dot:disabled { cursor: default; opacity: 0.75; }
+.map-dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.map-actions { display: flex; gap: 4px; justify-content: flex-end; padding: 4px 0 4px 8px; }
+.map-btn {
+  background: transparent; border: 1px solid var(--line); color: var(--dim);
+  border-radius: 5px; padding: 3px 7px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.map-btn:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.map-btn:disabled { opacity: 0.35; cursor: default; }
+.map-btn-warn:hover:not(:disabled) { color: var(--warn); border-color: var(--warn); }
+
+@media (max-width: 720px) {
+  .map-row { grid-template-columns: minmax(84px, 110px) repeat(var(--cols, 1), minmax(44px, 1fr)) auto; }
+  .map-actions { flex-direction: column; }
+}
+
 .voice.active { box-shadow: inset 2px 0 0 var(--accent); }
 .voice.active .voice-name span::after {
   content: "editing"; margin-left: 8px; font-size: 10px; font-weight: 500;

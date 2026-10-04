@@ -31,6 +31,10 @@ import {
   randomVelocity, curveVelocity, accentVelocity,
 } from './velocity-lane.js';
 import { applyEdits, findCollisions, clampVelocity } from './edits.js';
+import {
+  parseCasm, writeCasm, casmWithEdits, styleParts, applyCasmOperations,
+} from './cseg.js';
+import { MapView, describeMap } from './map-view.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -47,6 +51,8 @@ const el = {
   summary: $('summary'),
   declared: $('declared'), declaredHint: $('declaredHint'), blockDeclared: $('blockDeclared'),
   status: $('status'),
+  map: $('map'), mapHint: $('mapHint'), mapSummary: $('mapSummary'),
+  blockMap: $('blockMap'), btnCopyMap: $('btnCopyMap'), saveHint: $('saveHint'),
 
   partSelect: $('partSelect'), snap: $('snap'), followPlay: $('followPlay'),
   btnFit: $('btnFit'), btnRevert: $('btnRevert'), editCount: $('editCount'),
@@ -94,6 +100,8 @@ let audioCtx = null;
 let roll = null;
 /** @type {VelocityLane|null} */
 let lane = null;
+/** @type {MapView|null} */
+let mapView = null;
 let rafId = null;
 
 function say(message, kind = '') {
@@ -283,6 +291,11 @@ async function loadFile(file) {
       activeChannel: rows.length ? rows[0].channel : -1,
       pendingVelocity: new Map(),
       pendingShape: new Map(),
+      // Section-map edits, as intentions replayed onto a fresh parse. See the note
+      // on casmWithEdits: the CASM offset moves when a note edit changes the length
+      // of the track in front of it.
+      casmOps: [],
+      casmError: null,
       // Set only once the slider or a chip has been touched. Null means "no bulk
       // intent", so a download after nothing but a lane drag writes only the
       // dragged notes instead of flattening every part to the slider value.
@@ -297,6 +310,7 @@ async function loadFile(file) {
     el.panelEdit.classList.remove('hidden');
 
     mountCanvases();
+    mountMap();
     renderMeta();
     renderPartSelect();
     renderTimeline();
@@ -351,6 +365,16 @@ function mountCanvases() {
 function afterEdit() {
   draw();
   refresh();
+}
+
+function mountMap() {
+  mapView = new MapView(el.map, {
+    onToggle: (section, channel, on) => stageCasm({ op: 'channel', section, channel, on }),
+    onRename: (section, name) => stageCasm({ op: 'rename', section, name }),
+    onRemove: (section) => stageCasm({ op: 'remove', section }),
+    onClone: (after) => stageCasm({ op: 'clone', after }),
+  });
+  renderMap();
 }
 
 function draw() {
@@ -432,6 +456,97 @@ function seekTo(tick) {
   roll.clampScroll();
   draw();
   if (player) player.start(Math.max(0, tickToSeconds(state.tempoMap, tick, state.division)));
+}
+
+// ---- the section map ---------------------------------------------------------
+
+/**
+ * The map as it would be written, which is the only version worth showing.
+ *
+ * Rendering the original parse and applying the staged edits separately would let
+ * the two disagree, and the user would be looking at a map that is not the one in
+ * the file they are about to download.
+ *
+ * A map that cannot be read is reported and then set aside. It is one feature
+ * among several in this page, and a file whose section map is in a layout this
+ * reader does not recognise must still load its notes - otherwise one odd style
+ * makes the whole tool look broken.
+ */
+function currentMap() {
+  if (!state) return { casm: null, parts: [], error: null };
+  let result;
+  try {
+    result = casmWithEdits(state.buffer, state.casmOps);
+  } catch (err) {
+    state.casmError = err instanceof Error ? err.message : String(err);
+    return { casm: null, parts: [], error: state.casmError };
+  }
+  state.casmError = result.reason ?? null;
+  return { casm: result.casm, parts: result.casm ? styleParts(result.casm) : [], error: state.casmError };
+}
+
+function renderMap() {
+  if (!state || !mapView) return;
+
+  let live = null;
+  try {
+    live = parseCasm(state.buffer);
+  } catch (err) {
+    live = null;
+    state.casmError = err instanceof Error ? err.message : String(err);
+  }
+
+  if (!live) {
+    el.blockMap.classList.remove('hidden');
+    el.mapHint.textContent = '';
+    el.map.textContent = '';
+    el.map.append(Object.assign(document.createElement('p'), {
+      className: 'empty',
+      textContent: state.casmError
+        ? `This file's variation map could not be read: ${state.casmError}`
+        : 'This file has no variation map. The note tools below still work on it.',
+    }));
+    el.mapSummary.textContent = '';
+    return;
+  }
+
+  const { casm, parts } = currentMap();
+  el.blockMap.classList.remove('hidden');
+
+  mapView.render(casm, parts, { editable: true });
+
+  const info = describeMap(live);
+  el.mapHint.textContent = `${live.sections.length} variation${live.sections.length === 1 ? '' : 's'}`
+    + ` \u00b7 ${parts.length} part${parts.length === 1 ? '' : 's'}`;
+  const staged = state.casmOps.length;
+  el.mapSummary.innerHTML = info.complete
+    ? ''
+    : `<b>Note:</b> ${esc(info.text)}`;
+  if (staged) {
+    el.mapSummary.innerHTML += `<br><b>${staged}</b> map change${staged === 1 ? '' : 's'} staged.`;
+  }
+  if (state.casmError) {
+    el.mapSummary.innerHTML += `<br><b>Could not apply a change:</b> ${esc(state.casmError)}`;
+  }
+}
+
+/** Stage a map operation, then redraw. Nothing is written until download. */
+function stageCasm(operation) {
+  if (!state) return;
+  // A toggle that is already in the requested state is dropped rather than
+  // appended, so clicking a dot twice returns the file to exactly its original
+  // bytes instead of leaving two no-op operations behind.
+  if (operation.op === 'channel') {
+    const at = state.casmOps.findIndex(
+      (o) => o.op === 'channel' && o.section === operation.section && o.channel === operation.channel,
+    );
+    if (at >= 0) state.casmOps.splice(at, 1);
+    if (operation.on) state.casmOps.push(operation);
+  } else {
+    state.casmOps.push(operation);
+  }
+  renderMap();
+  refresh();
 }
 
 // ---- panels -----------------------------------------------------------------
@@ -579,17 +694,25 @@ function refresh() {
   }
 
   const total = pendingCount();
-  el.btnRevert.disabled = total === 0 && state.bulkVelocity === null;
-  el.editCount.textContent = total === 0 && state.bulkVelocity === null
+  const mapChanges = state.casmOps.length;
+  el.btnRevert.disabled = total === 0 && mapChanges === 0 && state.bulkVelocity === null;
+  el.editCount.textContent = total === 0 && mapChanges === 0 && state.bulkVelocity === null
     ? 'No pending edits'
-    : `${state.pendingVelocity.size} velocity \u00b7 ${state.pendingShape.size} pitch/length`;
+    : [
+      mapChanges ? `${mapChanges} map` : null,
+      state.pendingVelocity.size ? `${state.pendingVelocity.size} velocity` : null,
+      state.pendingShape.size ? `${state.pendingShape.size} pitch/length` : null,
+    ].filter(Boolean).join(' \u00b7 ');
 
   // The selection, not the part on screen: the bulk controls and the download
   // both work across every included part.
   const chosen = bulkTargetNotes();
   const bulkWrites = state.bulkVelocity !== null
     && chosen.some((n) => (pendingVelocityOf(n) ?? n.velocity) !== clampVelocity(v));
-  el.btnDownload.disabled = chosen.length === 0 && total === 0 && !bulkWrites;
+  el.btnDownload.disabled = chosen.length === 0 && total === 0 && !bulkWrites && mapChanges === 0;
+  el.saveHint.textContent = mapChanges
+    ? `${mapChanges} variation-map change${mapChanges === 1 ? '' : 's'} will be written into the download`
+    : 'Your original file is never modified';
 
   if (chosen.length === 0) {
     el.summary.innerHTML = '<b>No notes match</b> - include a part or widen the pitch range.';
@@ -661,10 +784,16 @@ function mulberry32(seed) {
 /**
  * Fold the pending edits into a new buffer.
  *
- * Two passes, in this order, and the order is the whole trick. Pitch and length
+ * Three passes, in this order, and the order is the whole trick. Pitch and length
  * re-emit tracks and shift every byte after them, which would invalidate the
- * offsets a velocity edit needs. So the structural edits go in first, the file is
- * re-read to get fresh offsets, and only then are the velocity bytes written.
+ * offsets the later passes need. So the structural note edits go in first, then
+ * the section map, and each pass re-reads the file to get fresh offsets before the
+ * next one runs. Velocity goes last because it is the only pass that writes
+ * individual bytes at remembered positions.
+ *
+ * CASM sits after the tracks in these files, so a note-length edit moves it. That
+ * is why the map is re-parsed here rather than reusing the parse the edits were
+ * staged against.
  *
  * @returns {ArrayBuffer}
  */
@@ -694,8 +823,29 @@ function buildEdited() {
     }
   }
 
+  if (state.casmOps.length > 0) {
+    // Re-parsed from the current buffer, because the pass above may have moved it.
+    let casm = null;
+    try {
+      casm = parseCasm(buffer);
+    } catch (err) {
+      casm = null;
+      say(`The variation map could not be read, so the map changes were left out: ${err.message}`, 'warn');
+    }
+    if (!casm) {
+      say('This file has no variation map, so the map changes cannot be written.', 'warn');
+    } else {
+      const applied = applyCasmOperations(casm, state.casmOps);
+      if (!applied.ok) {
+        say(`Stopped before writing: ${applied.reason}`, 'warn');
+      } else {
+        buffer = writeCasm(buffer, casm);
+      }
+    }
+  }
+
   if (state.pendingVelocity.size > 0 || state.bulkVelocity !== null) {
-    // Fresh offsets, because the pass above may have moved every byte.
+    // Fresh offsets, because the passes above may have moved every byte.
     const fresh = parseAll(buffer);
     const byKey = new Map(fresh.notes.map((n) => [noteKey(n), n]));
     const targets = [];
@@ -919,6 +1069,7 @@ el.btnReset.addEventListener('click', () => {
   state = null;
   roll = null;
   lane = null;
+  mapView = null;
   el.file.value = '';
   el.panelEdit.classList.add('hidden');
   el.panelLoad.classList.remove('hidden');
@@ -958,9 +1109,31 @@ el.btnRevert.addEventListener('click', () => {
   if (!state) return;
   state.pendingVelocity.clear();
   state.pendingShape.clear();
+  state.casmOps.length = 0;
+  state.casmError = null;
   state.bulkVelocity = null;
+  renderMap();
   setActivePart(state.activeChannel);
   say('Pending edits discarded. The file in memory is untouched.', 'ok');
+});
+
+el.btnCopyMap.addEventListener('click', async () => {
+  if (!state || !mapView) return;
+  const text = mapView.toText();
+  try {
+    await navigator.clipboard.writeText(text);
+    say('The variation map is on the clipboard.', 'ok');
+  } catch {
+    // Clipboard access needs a secure context and permission; a download always
+    // works, so offer that rather than failing silently.
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${state.name.replace(/\.sty$/i, '')}-map.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 });
 
 el.noteLow.addEventListener('change', refresh);
@@ -1005,10 +1178,14 @@ el.btnDownload.addEventListener('click', () => {
   if (!state) return;
   try {
     download(buildEdited(), editedName());
-    const total = pendingCount();
-    say(total
-      ? `Wrote ${total} pending edit(s) into ${editedName()}.`
-      : `Set velocity to ${el.velocity.value} in ${editedName()}.`, 'ok');
+    const map = state.casmOps.length;
+    const notes = pendingCount();
+    const parts = [
+      map ? `${map} map change${map === 1 ? '' : 's'}` : null,
+      notes ? `${notes} note edit${notes === 1 ? '' : 's'}` : null,
+      !map && !notes ? `velocity set to ${el.velocity.value}` : null,
+    ].filter(Boolean);
+    say(`Wrote ${parts.join(' and ')} into ${editedName()}.`, 'ok');
   } catch (err) {
     say(`Could not write the file: ${err?.message ?? err}`, 'warn');
   }

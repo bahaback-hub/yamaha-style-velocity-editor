@@ -77,9 +77,34 @@ test('reads declared sections and channel voices from CASM', () => {
   assert.equal(st.groups.length, 2);
   assert.deepEqual(st.groups[0].sections, ['Main A', 'Fill In AA']);
   assert.deepEqual(st.groups[0].voices.map((v) => v.name), ['MainDrum', 'Bass']);
-  // The channel byte is one-based and lands on the zero-based channel.
-  assert.equal(st.voices.find((v) => v.name === 'Bass').channel, 11);
+  // The channel byte is the zero-based channel the notes use, with no shift. This
+  // used to be read as one-based and have one subtracted, which put every part name
+  // on the wrong channel - and a style whose parts sit on channels 9-15 one-based
+  // declares 9-15 here.
+  assert.equal(st.voices.find((v) => v.name === 'Bass').channel, 12);
+  assert.equal(st.voices.find((v) => v.name === 'MainDrum').channel, 10);
 });
+
+test('a part name lands on the channel whose notes it belongs to', () => {
+  // The bug this guards against is silent: the name still appears, it just appears
+  // one channel to the left, so a drum part inherits the bass's name and the
+  // timeline shows the wrong instrument on the wrong lane.
+  const file = concat([
+    // A note on 0x99, which is zero-based channel 9.
+    smfFixture([0x00, 0x99, 36, 100, 0x60, 0x89, 36, 0]),
+    casmFixture([{ sections: ['Main A'], voices: [{ ch: 9, name: 'MainDrum' }] }]),
+  ]);
+  const st = readStyleStructure(toBuf(file));
+  assert.equal(st.voices[0].channel, 9);
+  assert.equal(notesFor(st)[9], 'MainDrum', 'channel 9 is the drum part');
+});
+
+/** The channel -> part-name map a caller would build from the structure. */
+function notesFor(st) {
+  const out = {};
+  for (const v of st.voices) out[v.channel] = v.name;
+  return out;
+}
 
 test('section names stop at the null padding, not run into the next chunk', () => {
   // A declared length longer than the text is the norm; the reader must cut at

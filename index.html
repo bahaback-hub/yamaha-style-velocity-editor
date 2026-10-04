@@ -34,6 +34,22 @@
       <button class="btn btn-ghost" id="btnReset">Change file</button>
     </div>
 
+    <!-- Section map: the first thing on the page, because it is the answer to
+         "what is actually stored in this style". -->
+    <div class="block block-map" id="blockMap">
+      <div class="block-head">
+        <h2>Variation map</h2>
+        <span class="hint" id="mapHint"></span>
+      </div>
+      <p class="hint map-legend">
+        A dot means that part sounds in that variation. Click a dot to switch the
+        part on or off for that variation alone. Copy duplicates a variation so you
+        can build a new one from a starting point.
+      </p>
+      <div class="map" id="map"></div>
+      <div class="summary" id="mapSummary"></div>
+    </div>
+
     <!-- Transport -->
     <div class="transport" role="group" aria-label="Playback">
       <button class="btn btn-play" id="btnPlay" aria-label="Play">Play</button>
@@ -195,21 +211,32 @@
       <div class="voices" id="voices"></div>
     </div>
 
-    <!-- Selection range + save -->
+    <!-- Save -->
+    <div class="block">
+      <div class="block-head">
+        <h2>Save</h2>
+        <span class="hint" id="saveHint">Your original file is never modified</span>
+      </div>
+      <div class="actions">
+        <button class="btn" id="btnDownload" disabled>Download edited .STY</button>
+        <button class="btn btn-ghost" id="btnDownloadOrig" disabled>Download original</button>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" id="btnCopyMap">Copy the map as text</button>
+      </div>
+    </div>
+
+    <!-- Selection range -->
     <div class="block">
       <div class="block-head">
         <h2>Selection</h2>
-        <span class="hint">Narrows every operation and the download to a pitch range</span>
+        <span class="hint">Narrows the note operations and the download to a pitch range</span>
       </div>
       <div class="field narrow">
         <label for="noteLow">Lowest pitch</label>
         <select id="noteLow"></select>
         <label for="noteHigh">Highest pitch</label>
         <select id="noteHigh"></select>
-      </div>
-      <div class="actions">
-        <button class="btn" id="btnDownload" disabled>Download edited .STY</button>
-        <button class="btn btn-ghost" id="btnDownloadOrig" disabled>Download original</button>
       </div>
     </div>
 

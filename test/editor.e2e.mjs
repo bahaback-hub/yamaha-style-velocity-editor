@@ -70,11 +70,42 @@ const smf = concat([
   track(drums),
   track(bass),
 ]);
-const casm = chunk('CASM', chunk('CSEG', concat([
-  chunk('Sdec', concat([Uint8Array.from([...'Main A'].map((c) => c.charCodeAt(0))), Uint8Array.from([0, 0, 0, 0])])),
-  Uint8Array.from([0x2f, 10, ...name8('MainDrum')]),
-  Uint8Array.from([0x2f, 12, ...name8('Bass')]),
-])));
+// CASM with two CSEG groups, built to the real record shape: a 7-byte "Ctb2"
+// tag, 0x2F, the channel, an 8-byte padded name, then 38 parameter bytes. The
+// channel byte is the same zero-based number the notes use - 0x99 is channel 9,
+// 0x9b is channel 11.
+function voiceRecord(channel, name, fill = 0) {
+  const out = new Uint8Array(55);
+  out.set([...'Ctb2'].map((c) => c.charCodeAt(0)), 0);
+  out[7] = 0x2f;
+  out[8] = channel;
+  out.set(name8(name), 9);
+  out.fill(fill, 17);
+  out[17] = channel;
+  out[18] = 0x0f;
+  out[19] = 0xff;
+  return out;
+}
+function cseg(sectionName, records) {
+  const text = Uint8Array.from([...sectionName].map((c) => c.charCodeAt(0)));
+  const body = new Uint8Array(8 + text.length + records.length * 55);
+  body[0] = 0x53; body[1] = 0x64; body[2] = 0x65; body[3] = 0x63; // "Sdec"
+  new DataView(body.buffer).setUint32(4, text.length);
+  body.set(text, 8);
+  let p = 8 + text.length;
+  for (const r of records) { body.set(r, p); p += 55; }
+  return chunk('CSEG', body);
+}
+const casmGroups = [
+  cseg('Main A', [voiceRecord(9, 'MainDrum', 0x20), voiceRecord(11, 'Bass', 0x40)]),
+  cseg('Main B', [voiceRecord(9, 'MainDrum', 0x20)]),
+];
+const casmBody = new Uint8Array(casmGroups.reduce((a, g) => a + g.length, 0));
+{
+  let q = 0;
+  for (const g of casmGroups) { casmBody.set(g, q); q += g.length; }
+}
+const casm = chunk('CASM', casmBody);
 
 const styPath = join(OUT, 'editor.sty');
 writeFileSync(styPath, concat([smf, casm]));
@@ -287,8 +318,11 @@ const bassFirst = await page.evaluate(() => window.__editor.first());
 check('the bass part starts on its own pitch', bassFirst.pitch === 40, `pitch ${bassFirst.pitch}`);
 
 // A drag in this part must not touch the drum part.
-const bassBarX = (await boxOf('#velane')).x + bassFirst.x + 1;
-const bassFromY = laneBox.y + (await page.evaluate(() => window.__editor.laneY(80)));
+// A drag in this part must not touch the drum part. The box is re-measured here
+// for both axes: the part selector is above the lane, and choosing it scrolls.
+const bassLane = await boxOf('#velane');
+const bassBarX = bassLane.x + bassFirst.x + 1;
+const bassFromY = bassLane.y + (await page.evaluate(() => window.__editor.laneY(80)));
 await page.mouse.move(bassBarX, bassFromY);
 await page.mouse.down();
 await page.mouse.move(bassBarX, bassFromY - 40, { steps: 8 });
@@ -390,7 +424,82 @@ check('a refused import changes nothing',
 // ---- no stray writes ---------------------------------------------------------------------
 check('the original file on disk was never touched',
   Buffer.compare(readFileSync(styPath), readFileSync(styPath)) === 0);
-check('no JS errors during the whole session', errors.length === 0, errors.slice(0, 3).join(' | '));
+// ---- the variation map -----------------------------------------------------
+// The map is the reason this tool exists, so it gets its own checks: that it reads
+// the file's real structure, that a toggle changes exactly one record, and that
+// the notes behind it are untouched.
+//
+// Discard first. Earlier sections leave note edits staged, and a download folds
+// everything together - which is correct, but it would make the byte counts here
+// describe two changes at once instead of one.
+await page.click('#btnRevert');
+check('revert clears the map stage too',
+  !(await page.locator('#btnRevert').isEnabled()));
+
+check('the map is on the page before anything else', await page.locator('#blockMap').isVisible());
+check('one row per variation', await page.locator('.map-row').count() - 1 === 2,
+  `${await page.locator('.map-row').count() - 1} rows`);
+check('the hint names both parts', /2 parts/.test(await page.locator('#mapHint').textContent()),
+  await page.locator('#mapHint').textContent());
+
+// The fixture declares Main A with both parts and Main B with the drum only.
+const rows = page.locator('.map-body .map-row');
+const dotsIn = (row) => row.locator('.map-dot');
+// The filled state is a class on the dot itself, not on a child of it.
+const onIn = (row) => row.locator('.map-dot.on');
+check('Main A shows both of its parts on', await onIn(rows.nth(0)).count() === 2,
+  `${await onIn(rows.nth(0)).count()} on`);
+check('Main B shows only the drum part on', await onIn(rows.nth(1)).count() === 1,
+  `${await onIn(rows.nth(1)).count()} on`);
+
+// Turning the bass on in Main B. The bass column is the second dot in that row.
+await dotsIn(rows.nth(1)).nth(1).click();
+await page.waitForTimeout(120);
+check('the toggle is reflected on screen', await onIn(rows.nth(1)).count() === 2, 'the dot filled in');
+check('the change is staged, not written', /1 map change staged/.test(await page.locator('#mapSummary').textContent()));
+check('download becomes available', await page.locator('#btnDownload').isEnabled());
+
+const [dlMap] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const savedMap = join(OUT, 'map.sty');
+await dlMap.saveAs(savedMap);
+const mapBytes = readFileSync(savedMap);
+const originalBytes = readFileSync(styPath);
+check('a map edit grows the file by exactly one record', mapBytes.length === originalBytes.length + 55,
+  `${originalBytes.length} -> ${mapBytes.length}`);
+
+// Read the written file back and ask what it now says.
+const { parseCasm } = await import('../src/cseg.js');
+const mapBuf = toBuf(mapBytes);
+const casmAfter = parseCasm(mapBuf);
+check('Main B now declares the bass part', casmAfter.sections[1].channels.includes(11),
+  casmAfter.sections[1].channels.join(','));
+const bassRecord = casmAfter.sections[1].records.find((r) => r.channel === 11);
+const donor = parseCasm(toBuf(originalBytes)).sections[0].records.find((r) => r.channel === 11);
+check('the added part brought its voice settings with it',
+  JSON.stringify([...bassRecord.params]) === JSON.stringify([...donor.params]),
+  'otherwise the arranger could not play it');
+
+// And the notes must be exactly as they were.
+const mapParsed = indexNotes(mapBuf, findMidiPayloads(mapBuf).payloads[0].offset,
+  findMidiPayloads(mapBuf).payloads[0].size);
+check('the notes came through a map edit untouched', mapParsed.notes.length === 6,
+  `${mapParsed.notes.length} notes`);
+const originalVelocities = readBack(styPath).parsed.notes.map((n) => n.velocity);
+check('no velocity moved',
+  JSON.stringify(mapParsed.notes.map((n) => n.velocity)) === JSON.stringify(originalVelocities),
+  `${mapParsed.notes.map((n) => n.velocity).join(',')} vs ${originalVelocities.join(',')}`);
+
+// Clicking the same dot again must return the file to its original bytes.
+await dotsIn(rows.nth(1)).nth(1).click();
+await page.waitForTimeout(120);
+const [dlBack] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const savedBack = join(OUT, 'map-back.sty');
+await dlBack.saveAs(savedBack);
+check('toggling back restores the original bytes exactly',
+  Buffer.compare(readFileSync(savedBack), originalBytes) === 0,
+  `${readFileSync(savedBack).length} vs ${originalBytes.length}`);
+
+check('no JS errors at the end', errors.length === 0, errors.slice(0, 3).join(' | '));
 
 await browser.close();
 const failed = checks.filter((c) => !c.ok);

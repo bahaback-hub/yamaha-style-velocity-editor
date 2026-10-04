@@ -1,47 +1,66 @@
 # Yamaha Style Editor
 
-Edit **velocity, pitch and note length** inside Yamaha `.STY` style files — in the
-browser, with a piano roll, and with no server and no upload.
+Read a Yamaha `.STY` file, **see the map of every variation it contains**, edit
+that map, and edit the velocity, pitch and length of its notes. All in the
+browser, with no server and no upload.
 
-Built for PSR-A5000, Genos and other arrangers that read SFF2 styles, but the
-reader also accepts SFF1 and the bare-MIDI `.STY` exports that style utilities
-produce.
+Built for PSR-A5000, Genos and other arrangers, and tested against a collection of
+real exported Arabic styles.
 
 ---
 
-## What it does
+## The variation map
 
-1. You drop a `.STY` file onto the page.
-2. It reads the container, indexes every note-on with its channel, pitch,
-   velocity and position in time, and reads the style's declared part names and
-   sections out of the `CASM` chunk.
-3. You pick a part and edit it in two linked views:
-   - **Piano roll** — one canvas per part. Drag a note up or down to retune it,
-     drag its right edge to change its length, drag empty space to pan, wheel to
-     zoom, shift+wheel for height, double-click to seek.
-   - **Velocity lane** — one draggable bar per note, sharing the roll's time scale
-     so a note and its bar always sit at the same x.
-4. Or you work in bulk, on the part you have selected: set, scale, offset,
-   humanise, randomise, curve by position, or accent what is already loud.
-5. You press **Play** and hear the result with the pending edit applied, or the
-   file's own values. Velocity maps to amplitude, so 40 is audible as a ghost note
-   and 127 as a full hit.
-6. You download the edited style, save the edit as a browser preset, or export it
-   as JSON. The original file is never modified.
+This is the main screen, and it is the thing the file actually knows.
+
+Every style declares, for each of its variations, which parts sound:
+
+```
+CASM
+  CSEG  <- Main A          Sdec "Main A" + one record per part
+  CSEG  <- Main B
+  CSEG  <- Intro A
+  CSEG  <- Ending A
+  ...
+```
+
+The table shows one row per variation and one column per part, a dot where the part
+sounds. **Click a dot to switch that part on or off for that variation alone.**
+Copy duplicates a variation so you can build a new one from a starting point;
+Rename and Delete work on the whole group.
+
+Two things the table tells you honestly rather than hiding:
+
+- **How complete the map is.** Most exported styles carry fewer than the full
+  fifteen variations — the ones the arranger's editor happened to write. The page
+  says so instead of quietly showing seven rows.
+- **When a column is ambiguous.** A channel can carry different part names in
+  different variations (`Clavi` in most of a style, `Pad` in its ending). Those
+  columns are marked, because "which part is this" stops having one answer.
+
+### What the map is honest about
+
+The file records **which parts play in each variation**. It does **not** record
+**which note belongs to which variation** — these exports flatten the performance
+into one timeline. So this tool does not claim to know, and the per-variation note
+work is a separate feature that says when it is guessing.
+
+---
+
+## Editing notes
+
+Below the map, one part at a time:
+
+- **Piano roll** — drag a note up or down to retune it, drag its right edge to
+  change its length, drag empty space to pan, wheel to zoom, shift+wheel for
+  height, double-click to seek.
+- **Velocity lane** — one draggable bar per note, sharing the roll's time scale so
+  a note and its bar always sit at the same x.
+- **Bulk transforms** on the part you have selected: set, scale, offset, humanise,
+  randomise, curve by position, or accent what is already loud.
 
 Edits are **staged, not applied**. The file in memory stays exactly as it was
 loaded until you download; **Revert** throws the whole edit away.
-
-## The gestures
-
-| Gesture | Effect |
-| --- | --- |
-| Drag a bar in the lane | Set that note's velocity |
-| Drag a note up or down | Retune it, on the note-on *and* the note-off |
-| Drag a note's right edge | Change its length |
-| Click a part row | Include or exclude it from playback and bulk operations |
-| Double-click a part row | Bring it up in the roll |
-| Ctrl + wheel | — |
 
 ## Running it
 
@@ -147,17 +166,49 @@ come back unchanged.
 If that test ever fails, no length edit should be trusted. It is the thing that
 makes the rest safe rather than hopeful.
 
-### Sections are declared, not recoverable
+### Sections are declared, not recoverable in time
 
 `CASM` lists the section names the original style advertises — `Main A`,
-`Fill In AA`, `Intro B`, `Ending C` and so on. It does **not** record where those
-sections start in time, because these exports flatten the performance into one
-timeline. So the notes are grouped by part, and the timeline's "blocks" are
-inferred from where the sounding parts change. Both are labelled as such in the
-interface.
+`Main B`, `Intro A`, `Ending A` and so on — and, per variation, which parts sound.
+That much is authoritative, and it is what the variation map shows.
+
+What it does **not** record is where those variations start in time, because
+these exports flatten the performance into one timeline. So the notes cannot be
+split per variation from the file alone. The map is exact; anything that needs to
+know which note belongs to which variation has to infer it, and must say so when
+it is unsure.
 
 `Bridge` appears in the declared list only if the style declares one; most of
 this collection does not.
+
+### The map's record layout, and why it is safe to write
+
+Each part inside a variation is a **55-byte** record: a 7-byte `Ctb2` tag, the
+`0x2F` marker, the channel number, an 8-byte padded part name, and 38 parameter
+bytes that begin with the channel number again. The arithmetic checks out on real
+files — a `Main A` with six parts is `14 + 6 * 55 = 344` bytes, a `Main B` with
+five is `14 + 5 * 55 = 289`, and `Intro A` at 125 is a seven-character name plus
+two records.
+
+Those 38 parameter bytes are not decoded. They describe the voice rather than the
+map, and they are carried through verbatim in both directions, so an edit to the
+map cannot disturb them.
+
+The gate on all of this is one test: **parse every style in the collection, write
+it straight back with nothing changed, require identical bytes.** That holds for
+all 202 of them. If it ever stops holding, no map edit should be trusted.
+
+Switching a part **on** copies its 38 parameter bytes from a variation that
+already uses that channel, because a record without them lists a part the arranger
+cannot play. That is why the tool refuses to switch on a channel no other
+variation uses, rather than inventing zeros.
+
+### One thing that was wrong and is now fixed
+
+The CASM channel byte is the **same zero-based number the MIDI events use**. It
+used to be read as one-based and have one subtracted, which put every part name one
+channel to the left of the notes it belonged to — a drum part inherited the bass's
+name and the timeline showed the wrong instrument on the wrong lane.
 
 ### Two things that can bite, and are checked for
 
@@ -205,16 +256,21 @@ and would discard every edit as a no-op.
 ## Tests
 
 ```sh
-npm test                          # 118 unit tests
+npm test                          # 135 unit tests
 npx playwright install chromium   # once, for the browser checks
 npm run serve                     # in one terminal
-npm run test:browser              # 123 browser checks across four files
+npm run test:browser              # 138 browser checks across four files
 ```
 
 The parser tests run against synthetic fixtures built in the test files rather
 than real styles. That is deliberate: they assert exact byte offsets, so a
 regression shows up as a wrong offset rather than a subtly wrong file that only
 fails on hardware. Real Yamaha files are not committed to this repository.
+
+`test/cseg.test.js` is the exception, and it is the important one: it walks the
+user's own `Saudi 1` collection on this machine and requires every one of those
+styles to rebuild to identical bytes. When the folder is absent the suite says so
+and the synthetic cases carry the weight alone.
 
 `test/audio.test.js` drives the player against a stubbed `AudioContext`, which is
 the only way to assert the scheduling maths — velocity-to-gain curve, voice cap,
@@ -229,35 +285,45 @@ downloaded file back and ask the parser what actually changed:
   audio nodes from the page proved unreliable (a subclassed `AudioContext` is not
   always the one the engine ends up calling), so these assert observable
   behaviour — clock, playhead, transport state.
-- `test/editor.e2e.mjs` — the roll and the lane: a real drag has to reach the
-  file, a length edit has to resize the right track without losing the other, and
-  presets and the JSON sidecar have to survive a round trip.
+- `test/editor.e2e.mjs` — the roll, the lane and the variation map: a real drag
+  has to reach the file, a length edit has to resize the right track without
+  losing the other, and a map toggle has to grow the file by exactly one 55-byte
+  record while leaving every note byte alone. Toggling a dot back must restore the
+  original file byte for byte.
 - `test/real.e2e.mjs` — the reference export, end to end: 4592 notes, twelve
   channels. Asserts that a one-note edit changes exactly one byte, and that the
-  saved file still re-emits byte-for-byte. Skips itself if the file is not
+  saved result still re-emits byte-for-byte. Skips itself if the file is not
   present.
 
 ## Limitations — please read
 
-- **No SFF2 `Sdst` section matrix.** Real arranger styles keep their section
-  layout in `Sdst`, which would give exact per-section note attribution. None
-  was available during development, so it is not implemented rather than
+- **The variation map is exact; note-to-variation attribution is not.** The file
+  records which parts play in each variation, and the map is exact. It does not
+  record which note belongs to which variation, so anything that needs that has to
+  infer it from where the sounding parts change — and several variations often
+  share an identical part layout, which makes the inference ambiguous. Treat the
+  map as authoritative and per-variation note work as a guide.
+- **Untested on hardware.** Nothing here has been loaded into a PSR-A5000. The
+  byte-level work is proven against the file format, but whether the instrument
+  honours an edited `CASM` has to be confirmed by ear. Start with a small change:
+  one part switched off in one variation.
+- **No `Sdst` section matrix.** Real arranger styles keep more section detail in
+  `Sdst`. These exports do not carry it, so it is not implemented rather than
   implemented and guessed.
-- **Timbre is an approximation**, as described above.
-- **Retuning and resizing are supported but riskier than velocity.** Velocity is a
-  single byte and cannot go wrong structurally. Pitch has to be written twice and
-  can create an overlap; length re-serialises the track. Both are covered by tests
-  against the real file, but check the result in an arranger before relying on it
-  on hardware.
+- **Timbre is an approximation** in playback, as described above. Dynamics are
+  faithful.
+- **Retuning and resizing are riskier than velocity.** Velocity is a single byte
+  and cannot go wrong structurally. Pitch has to be written twice and can create
+  an overlap; length re-serialises the track. Both are covered by tests against the
+  real file, but check the result before relying on it on hardware.
 - **Bulk transforms flatten dynamics by design.** Setting every note in a
   selection to one value removes the original accent pattern within it. Narrow the
   part or pitch range if you only want one drum part. Humanise uses a seeded
   generator, so re-running it is reproducible.
-- **Metadata is not rewritten.** Name, category and part names stay as they
-  were. Rename a style in the arranger's own editor.
-- **No undo in the page.** There is Revert, which discards *all* pending edits,
-  and presets, but not a per-gesture undo stack. Re-download the original to
-  compare.
+- **Metadata is not rewritten** beyond variation names. Style name, category and
+  part names stay as they were.
+- **No undo stack.** There is Revert, which discards *all* pending edits, and
+  presets, but not a per-gesture undo.
 
 ## License
 
