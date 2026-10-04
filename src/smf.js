@@ -85,6 +85,17 @@ export function readVarLen(view, p, limit) {
  * @property {number} tick delta-time in ticks (kept for reference)
  * @property {number} at absolute tick from the start of the payload
  * @property {number} durationTicks 0 when no note-off was found
+ * @property {number} pitchOffset absolute file offset of the note-on pitch byte
+ * @property {number} [releasePitchOffset] absolute file offset of the note-off pitch byte
+ * @property {number} [releaseAt] absolute tick of the note-off
+ * @property {number} openEventIndex index of this note's note-on in trackList[].events
+ * @property {number} closeEventIndex index of its note-off, or -1 when it hangs
+ *
+ * @typedef {object} TrackEvent
+ * @property {'note-on'|'note-off'|'meta'|'sysex'|'other'} kind
+ * @property {number} tick absolute tick within the track
+ * @property {number[]} bytes the event's bytes, excluding the delta-time
+ * @property {number} [pitchIndex] index of the pitch byte within `bytes`
  *
  * @typedef {{tick: number, usPerQuarter: number}} TempoPoint
  * @typedef {{numerator: number, denominator: number}} TimeSignature
@@ -124,6 +135,9 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
   // oldest is released first - which is what a player does too.
   /** @type {Map<string, NoteHit[]>} */
   const pending = new Map();
+  /** Raw events per track, so a track can be re-emitted byte-for-byte. */
+  /** @type {{events: TrackEvent[], trackIndex: number, start: number, length: number}[]} */
+  const trackList = [];
 
   while (p + 8 <= limit && str(view, p, p + 4) === 'MTrk') {
     const trackLen = view.getUint32(p + 4);
@@ -134,6 +148,8 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
     let cursor = trackStart;
     let status = 0;
     let abs = 0;
+    /** @type {TrackEvent[]} */
+    const events = [];
 
     while (cursor < trackEnd) {
       const delta = readVarLen(view, cursor, trackEnd);
@@ -144,15 +160,26 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
       if (abs > lengthTicks) lengthTicks = abs;
 
       let b = view.getUint8(cursor);
+      // Whether this event spelled out its own status byte. Under running status
+      // the status is omitted from the file entirely, so a re-emitter must not
+      // invent one - the raw bytes are copied back out and any extra byte would
+      // change the track's length and every delta after it. It also decides where
+      // the pitch byte sits, so the flag has to be right in both directions.
+      let hasStatus = true;
       if (b < 0x80) {
         // Running status: reuse the previous status byte.
         if (status === 0) break;
         b = status;
+        hasStatus = false;
       } else {
         cursor++;
         if (b < 0xf0) {
           status = b;
         } else if (b === 0xff) {
+          // cursor has already advanced past the 0xff, so the event's first byte
+          // is one further back. Copying from here instead would drop the 0xff
+          // and produce a meta event the next reader would not recognise.
+          const startByte = cursor - 1;
           const type = view.getUint8(cursor);
           cursor++;
           const len = readVarLen(view, cursor, trackEnd);
@@ -161,7 +188,8 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
           // from `cursor` points at the length bytes themselves, which silently
           // yields a nonsense tempo and time signature.
           const body = len.next;
-          cursor = body + len.value;
+          const end = body + len.value;
+          cursor = end;
           if (cursor > trackEnd) break;
           if (type === 0x51 && len.value === 3) {
             const usPerQuarter =
@@ -176,12 +204,24 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
               denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
             };
           }
+          events.push({
+            kind: 'meta',
+            tick: abs,
+            bytes: Array.from(new Uint8Array(view.buffer, view.byteOffset + startByte, cursor - startByte)),
+          });
           continue;
         } else if (b === 0xf0 || b === 0xf7) {
+          // Same one-byte-back rule as the meta case: cursor is past the 0xF0.
+          const startByte = cursor - 1;
           const len = readVarLen(view, cursor, trackEnd);
           if (!len) break;
           cursor = len.next + len.value;
           if (cursor > trackEnd) break;
+          events.push({
+            kind: 'sysex',
+            tick: abs,
+            bytes: Array.from(new Uint8Array(view.buffer, view.byteOffset + startByte, cursor - startByte)),
+          });
           continue;
         } else {
           // System realtime / other: no running status to carry.
@@ -211,6 +251,13 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
             tick,
             at: abs,
             durationTicks: 0,
+            // Where the two editable bytes of this note-on live. Velocity is a
+            // fixed-width write; pitch has to be written twice, here and on the
+            // matching note-off, or the pair stops matching and the parser would
+            // read the note as hanging.
+            pitchOffset: cursor,
+            openEventIndex: events.length,
+            closeEventIndex: -1,
           };
           notes.push(hit);
           const list = pending.get(key);
@@ -220,21 +267,49 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
           // A note-off is either 0x8n or a 0x9n with velocity 0.
           const list = pending.get(key);
           const hit = list?.shift();
-          if (hit) hit.durationTicks = Math.max(0, abs - hit.at);
+          if (hit) {
+            hit.durationTicks = Math.max(0, abs - hit.at);
+            hit.releaseAt = abs;
+            hit.releaseTick = delta.value;
+            hit.releaseOffset = cursor;
+            // cursor sits on the pitch byte of the note-off, whether or not the
+            // event carried its own status byte.
+            hit.releasePitchOffset = cursor;
+            hit.closeEventIndex = events.length;
+            hit.releaseKind = type === 0x80 ? 'note-off' : 'note-on-zero';
+          }
         }
+        // Keep the raw event so the track can be re-emitted byte-for-byte.
+        events.push({
+          kind: type === 0x90 && velocity > 0 ? 'note-on' : 'note-off',
+          tick: abs,
+          bytes: hasStatus ? [b, note, velocity] : [note, velocity],
+          // Where the pitch byte sits inside `bytes`. Under running status the
+          // status byte is absent from the file, so it is absent here too.
+          pitchIndex: hasStatus ? 1 : 0,
+        });
         cursor += 2;
       } else {
         // Program change and channel pressure carry one data byte.
-        cursor += type === 0xc0 || type === 0xd0 ? 1 : 2;
+        const width = type === 0xc0 || type === 0xd0 ? 1 : 2;
+        events.push({
+          kind: 'other',
+          tick: abs,
+          bytes: hasStatus
+            ? Array.from(new Uint8Array(view.buffer, view.byteOffset + cursor - 1, 1 + width))
+            : Array.from(new Uint8Array(view.buffer, view.byteOffset + cursor, width)),
+        });
+        cursor += width;
       }
       if (cursor > trackEnd) break;
     }
 
+    trackList.push({ events, trackIndex, start: trackStart - 8, length: trackLen });
     p = trackEnd;
     trackIndex++;
   }
 
-  return { notes, tracks: trackIndex, division, layout: 'smf', tempoMap, timeSignature, lengthTicks };
+  return { notes, tracks: trackIndex, division, layout: 'smf', tempoMap, timeSignature, lengthTicks, trackList };
 }
 
 /**
@@ -301,7 +376,7 @@ export function ticksPerBar(timeSignature, division = 480) {
  * and quietly getting silence on half the hardware, so scan for the first MTrk
  * and parse from there.
  *
- * @returns {{notes: NoteHit[], tracks: number, division: number, layout: 'tracks-only', error?: string}}
+ * @returns {{notes: NoteHit[], tracks: number, division: number, layout: 'tracks-only', tempoMap: TempoPoint[], timeSignature: TimeSignature, lengthTicks: number, trackList: {events: TrackEvent[], trackIndex: number, start: number, length: number}[], error?: string}}
  */
 export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
   const view = new DataView(buffer);
@@ -314,6 +389,9 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
   let timeSignature = { numerator: 4, denominator: 4 };
   /** @type {Map<string, NoteHit[]>} */
   const pending = new Map();
+  /** Raw events per track, so this copy can be edited and written back too. */
+  /** @type {{events: TrackEvent[], trackIndex: number, start: number, length: number}[]} */
+  const trackList = [];
   let p = payloadOffset;
   let trackIndex = 0;
   let lengthTicks = 0;
@@ -331,6 +409,9 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
     let cursor = trackStart;
     let status = 0;
     let abs = 0;
+    /** @type {TrackEvent[]} */
+    const events = [];
+
     while (cursor < trackEnd) {
       const delta = readVarLen(view, cursor, trackEnd);
       if (!delta) break;
@@ -339,18 +420,22 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
       if (abs > lengthTicks) lengthTicks = abs;
 
       let b = view.getUint8(cursor);
+      let hasStatus = true;
       if (b < 0x80) {
         if (status === 0) break;
         b = status;
+        hasStatus = false;
       } else {
         cursor++;
         if (b < 0xf0) {
           status = b;
         } else if (b === 0xff) {
+          const startByte = cursor - 1;
           const type = view.getUint8(cursor);
-          const len = readVarLen(view, cursor + 1, trackEnd);
+          cursor++;
+          const len = readVarLen(view, cursor, trackEnd);
           if (!len) break;
-          // Same offset rule as the header path: after the length field.
+          // The body starts *after* the variable-length length field.
           const body = len.next;
           cursor = body + len.value;
           if (cursor > trackEnd) break;
@@ -366,12 +451,23 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
               denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
             };
           }
+          events.push({
+            kind: 'meta',
+            tick: abs,
+            bytes: Array.from(new Uint8Array(view.buffer, view.byteOffset + startByte, cursor - startByte)),
+          });
           continue;
         } else if (b === 0xf0 || b === 0xf7) {
+          const startByte = cursor - 1;
           const len = readVarLen(view, cursor, trackEnd);
           if (!len) break;
           cursor = len.next + len.value;
           if (cursor > trackEnd) break;
+          events.push({
+            kind: 'sysex',
+            tick: abs,
+            bytes: Array.from(new Uint8Array(view.buffer, view.byteOffset + startByte, cursor - startByte)),
+          });
           continue;
         } else {
           status = 0;
@@ -397,6 +493,9 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
             tick: delta.value,
             at: abs,
             durationTicks: 0,
+            pitchOffset: cursor,
+            openEventIndex: events.length,
+            closeEventIndex: -1,
           };
           notes.push(hit);
           const list = pending.get(key);
@@ -404,20 +503,46 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
           else pending.set(key, [hit]);
         } else {
           const hit = pending.get(key)?.shift();
-          if (hit) hit.durationTicks = Math.max(0, abs - hit.at);
+          if (hit) {
+            hit.durationTicks = Math.max(0, abs - hit.at);
+            hit.releaseAt = abs;
+            hit.releaseTick = delta.value;
+            hit.releaseOffset = cursor;
+            hit.releasePitchOffset = cursor;
+            hit.closeEventIndex = events.length;
+            hit.releaseKind = type === 0x80 ? 'note-off' : 'note-on-zero';
+          }
         }
+        events.push({
+          kind: type === 0x90 && velocity > 0 ? 'note-on' : 'note-off',
+          tick: abs,
+          bytes: hasStatus ? [b, note, velocity] : [note, velocity],
+          pitchIndex: hasStatus ? 1 : 0,
+        });
         cursor += 2;
       } else {
-        cursor += type === 0xc0 || type === 0xd0 ? 1 : 2;
+        const width = type === 0xc0 || type === 0xd0 ? 1 : 2;
+        events.push({
+          kind: 'other',
+          tick: abs,
+          bytes: hasStatus
+            ? Array.from(new Uint8Array(view.buffer, view.byteOffset + cursor - 1, 1 + width))
+            : Array.from(new Uint8Array(view.buffer, view.byteOffset + cursor, width)),
+        });
+        cursor += width;
       }
       if (cursor > trackEnd) break;
     }
 
+    trackList.push({ events, trackIndex, start: p, length: trackLen });
     p = trackEnd;
     trackIndex++;
   }
 
-  return { notes, tracks: trackIndex, division: 0, layout: 'tracks-only', tempoMap, timeSignature, lengthTicks };
+  return {
+    notes, tracks: trackIndex, division: 0, layout: 'tracks-only',
+    tempoMap, timeSignature, lengthTicks, trackList,
+  };
 }
 
 function str(view, start, end) {
@@ -440,6 +565,27 @@ function str(view, start, end) {
  */
 export function applyVelocity(buffer, targets, velocity) {
   const clamped = Math.max(1, Math.min(127, Math.round(velocity)));
+  return writeVelocities(buffer, targets.map((t) => ({ velocityOffset: t.velocityOffset, velocity: clamped })));
+}
+
+/**
+ * Patch a different velocity into each note, in one copy of the input.
+ *
+ * The bulk form above is the common case - one slider, many notes - but dragging a
+ * bar in the velocity lane produces a different value per note. Calling the bulk
+ * form once per distinct value would copy the whole file each time, so this writes
+ * them all in a single pass instead.
+ *
+ * @param {ArrayBuffer} buffer
+ * @param {{velocityOffset: number, velocity: number}[]} targets
+ * @returns {ArrayBuffer}
+ */
+export function applyVelocities(buffer, targets) {
+  return writeVelocities(buffer, targets);
+}
+
+/** Shared body: one copy of the buffer, then one byte written per target. */
+function writeVelocities(buffer, targets) {
   // slice() copies. `new Uint8Array(buffer)` does NOT: constructing a view over
   // an existing ArrayBuffer aliases it, so the write would land in the user's
   // original file - and with it, the bytes we promised not to touch.
@@ -448,7 +594,8 @@ export function applyVelocity(buffer, targets, velocity) {
   const view = new DataView(copy);
   for (const t of targets) {
     if (t.velocityOffset < 0 || t.velocityOffset >= out.byteLength) continue;
-    view.setUint8(t.velocityOffset, clamped);
+    const v = Math.max(1, Math.min(127, Math.round(t.velocity)));
+    view.setUint8(t.velocityOffset, v);
   }
   return copy;
 }
