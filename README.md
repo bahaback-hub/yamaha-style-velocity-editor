@@ -70,6 +70,18 @@ ones read `MID`. Editing only one means the change is silent on half the
 hardware in the family, so the tool patches every payload it finds and the test
 suite asserts the two stay in sync.
 
+Not every writer puts a standard `MThd` header in the second copy — a `MER`
+payload can be a bare run of `MTrk` chunks behind a few proprietary bytes. Those
+are read too, via `indexTracksOnly`.
+
+### Nothing is patched silently
+
+If a payload cannot be read at all, the page says so in plain language and
+names it, because "the edit did nothing" is otherwise indistinguishable from a
+bug. It reports which copy the change reached and warns that the instrument may
+still play the untouched copy. The download stays available for the copy that
+*was* readable, rather than refusing outright.
+
 ### Nothing else is touched
 
 The patcher writes specific bytes into a copy of the input. The container
@@ -81,10 +93,10 @@ length as the input and that only the intended bytes differ.
 ## Tests
 
 ```sh
-npm test                    # 16 parser tests
+npm test                    # 19 parser tests
 npx playwright install chromium   # once, for the browser check
 npm run serve               # in one terminal
-node test/ui.e2e.mjs        # 14 browser checks
+node test/ui.e2e.mjs        # 18 browser checks
 ```
 
 The parser tests run against a synthetic style built in the test file rather
@@ -93,8 +105,9 @@ regression shows up as a wrong offset rather than a subtly wrong file that only
 fails on hardware.
 
 The browser check drives the real page, downloads a file, and re-parses it to
-confirm the bytes — plus a regression guard that the original file on disk is
-unchanged.
+confirm the bytes. It also covers a headerless `MER`, and a payload that cannot
+be read at all — the case where the tool has to admit it can only reach one
+copy. Plus a regression guard that the original file on disk is unchanged.
 
 ## Limitations — please read
 

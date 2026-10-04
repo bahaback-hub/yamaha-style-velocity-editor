@@ -7,7 +7,7 @@
  */
 
 import { findMidiPayloads } from './sff.js';
-import { indexNotes, applyVelocity, noteName, CHANNEL_NAMES } from './smf.js';
+import { indexNotes, indexTracksOnly, applyVelocity, noteName, CHANNEL_NAMES } from './smf.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -91,19 +91,50 @@ async function loadFile(file) {
       throw new Error('No MIDI data found inside this file. It may not be a style, or it may use a layout this tool does not read.');
     }
 
-    // Index every payload so the note list covers both copies of the music.
+    // Index every payload so the note list covers both copies of the music. A
+    // payload that will not parse is recorded rather than skipped: if MER were
+    // left alone the edit would be silent on newer arrangers, and the user has
+    // to be told that rather than discovering it on the instrument.
     const notes = [];
+    /** @type {{kind: string, ok: boolean, layout: string, count: number, detail: string}[]} */
+    const payloads = [];
     for (const p of info.payloads) {
-      const r = indexNotes(buffer, p.offset, p.size);
-      if (r.error) continue;
+      let r = indexNotes(buffer, p.offset, p.size);
+      if (r.error) {
+        // No MThd: some writers store a bare run of MTrk chunks instead.
+        const alt = indexTracksOnly(buffer, p.offset, p.size);
+        if (alt.notes.length > 0) {
+          r = alt;
+        } else {
+          payloads.push({
+            kind: p.kind,
+            ok: false,
+            layout: 'unknown',
+            count: 0,
+            detail: r.error,
+          });
+          continue;
+        }
+      }
+      payloads.push({
+        kind: p.kind,
+        ok: r.notes.length > 0,
+        layout: r.layout,
+        count: r.notes.length,
+        detail: r.error ?? '',
+      });
       for (const n of r.notes) notes.push({ ...n, payload: p.kind });
     }
 
     if (notes.length === 0) {
-      throw new Error('The style contains MIDI data but no note-on events were found in it.');
+      throw new Error(
+        `The style contains MIDI data but no readable note events were found. ` +
+          `${info.payloads.map((p) => p.kind).join(' and ')} could not be parsed.`,
+      );
     }
 
-    state = { name: file.name, buffer, version: info.version, notes, payloads: info.payloads };
+    const skipped = payloads.filter((p) => !p.ok);
+    state = { name: file.name, buffer, version: info.version, notes, payloads };
 
     const used = new Set(notes.map((n) => n.channel));
     const usedNames = [...used].sort((a, b) => a - b).map((c) => `ch${c + 1}`).join(', ');
@@ -118,7 +149,23 @@ async function loadFile(file) {
     el.panelLoad.classList.add('hidden');
     el.panelEdit.classList.remove('hidden');
     el.btnDownloadOrig.disabled = false;
-    say('Loaded. Choose what to change, then download.', 'ok');
+
+    // Say plainly what was and was not editable. A style usually carries the
+    // music twice and only editing one copy can be indistinguishable from the
+    // edit not working.
+    const perPayload = payloads
+      .map((p) => (p.ok ? `${p.kind} (${p.count} notes, ${p.layout})` : `${p.kind} not readable`))
+      .join(', ');
+    if (skipped.length === 0) {
+      say(`Loaded. Editing both copies: ${perPayload}.`, 'ok');
+    } else {
+      say(
+        `Loaded, but ${skipped.map((p) => p.kind).join(' and ')} could not be read, ` +
+          `so the edit will only reach ${info.payloads.filter((_, i) => payloads[i].ok).map((p) => p.kind).join(' and ')}. ` +
+          `Newer arrangers may play the untouched copy.`,
+        'warn',
+      );
+    }
     refresh();
   } catch (err) {
     state = null;
@@ -156,6 +203,11 @@ function refresh() {
   const distinct = [...new Set(chosen.map((n) => n.note))].sort((a, b) => a - b);
   const before = chosen.map((n) => n.velocity);
   const unchanged = before.filter((x) => x === v).length;
+  const byPayload = {};
+  for (const n of chosen) byPayload[n.payload] = (byPayload[n.payload] ?? 0) + 1;
+  const split = Object.entries(byPayload)
+    .map(([k, c]) => `${c} in ${k}`)
+    .join(', ');
 
   const preview = distinct
     .slice(0, 14)
@@ -164,7 +216,8 @@ function refresh() {
   const more = distinct.length > 14 ? ` +${distinct.length - 14} more` : '';
 
   el.summary.innerHTML =
-    `<b>${chosen.length}</b> notes selected across ${distinct.length} distinct pitches (${preview}${more}).<br>` +
+    `<b>${chosen.length}</b> notes selected across ${distinct.length} distinct pitches (${preview}${more})<br>` +
+    `Copies affected: ${split}<br>` +
     `Current velocities: min ${Math.min(...before)}, max ${Math.max(...before)}, ` +
     `average ${(before.reduce((a, b) => a + b, 0) / before.length).toFixed(1)}. ` +
     `Setting all to <b>${v}</b>${unchanged ? ` (${unchanged} already there)` : ''}.`;

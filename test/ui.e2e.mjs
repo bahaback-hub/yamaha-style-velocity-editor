@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { findMidiPayloads } from '../src/sff.js';
-import { indexNotes, applyVelocity } from '../src/smf.js';
+import { indexNotes, indexTracksOnly, applyVelocity } from '../src/smf.js';
 
 const OUT = 'C:/Users/DSER/AppData/Local/Temp/opencode/sty-e2e';
 mkdirSync(OUT, { recursive: true });
@@ -63,7 +63,12 @@ const trk = track([
   0x00, 0x80, 60, 0,
 ]);
 const smf = concat([mthd(1), trk]);
-const med = chunk('Smed', concat([chunk('MID', smf), chunk('MER', smf)]));
+// The MER copy is stored the way some writers do it: bare MTrk chunks behind a
+// few proprietary bytes, with no MThd. The page must still edit it rather than
+// silently patching only MID.
+const merJunk = Uint8Array.from([0x00, 0x00, 0x00, 0x00, 0x01, 0x20]);
+const merBare = concat([merJunk, trk]);
+const med = chunk('Smed', concat([chunk('MID', smf), chunk('MER', merBare)]));
 const head = Uint8Array.from([0x53, 0x46, 0x46, 0x32, 0, 0, 0, 8, 0x53, 0x53, 0x54, 0x4e]);
 const styPath = join(OUT, 'test-style.sty');
 writeFileSync(styPath, concat([head, med]));
@@ -153,18 +158,39 @@ check('downloaded file still parses as SFF2 with both payloads',
 let allSet = true;
 const seen = [];
 for (const p of info.payloads) {
-  const { notes } = indexNotes(gotBuf, p.offset, p.size);
-  seen.push(`${p.kind}:${notes.length}`);
+  // MER here has no MThd, so it has to be read the tracks-only way.
+  let r = indexNotes(gotBuf, p.offset, p.size);
+  if (r.error) r = indexTracksOnly(gotBuf, p.offset, p.size);
+  seen.push(`${p.kind}:${r.notes.length}/${r.layout}`);
   // 4 note-ons per payload, all at 127 after the patch.
-  if (notes.length !== 4 || !notes.every((n) => n.velocity === 127)) allSet = false;
+  if (r.notes.length !== 4 || !r.notes.every((n) => n.velocity === 127)) allSet = false;
 }
-check('every velocity in MID and MER is 127', allSet, seen.join(' '));
+check('every velocity in MID and headerless MER is 127', allSet, seen.join(' '));
 
 // And the original on disk must be unchanged - the page must not have edited
 // the source file in place.
 const reOrig = readFileSync(styPath);
 check('original file on disk is untouched',
   Buffer.compare(Buffer.from(reOrig), Buffer.from(original)) === 0);
+
+// ---- a payload that cannot be read must be reported, not swallowed ---------
+const unusableSty = join(OUT, 'unreadable-mer.sty');
+{
+  const junk = new Uint8Array(64).fill(0x00); // no MThd, no MTrk
+  const smf2 = concat([mthd(1), trk]);
+  const med2 = chunk('Smed', concat([chunk('MID', smf2), chunk('MER', junk)]));
+  const head2 = Uint8Array.from([0x53, 0x46, 0x46, 0x32, 0, 0, 0, 8, 0x53, 0x53, 0x54, 0x4e]);
+  writeFileSync(unusableSty, concat([head2, med2]));
+}
+
+await page.setInputFiles('#file', unusableSty);
+await page.waitForSelector('#panelEdit:not(.hidden)', { timeout: 15000 });
+const warn = await page.locator('#status').textContent();
+check('unreadable payload raises a visible warning', /could not be read/i.test(warn), warn.slice(0, 70));
+check('warning says the edit may not reach the instrument', /may play the untouched copy/i.test(warn));
+check('warning is styled as a warning, not a success',
+  (await page.locator('#status').getAttribute('class'))?.includes('warn') === true);
+check('the readable copy is still editable', await page.locator('#btnDownload').isEnabled());
 
 await browser.close();
 
@@ -174,4 +200,6 @@ if (failed.length) {
   console.log('  failing:', failed.map((f) => f.name).join('; '));
   process.exitCode = 1;
 }
+
+
 

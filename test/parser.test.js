@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readSff, readChunks, findMidiPayloads } from '../src/sff.js';
-import { indexNotes, applyVelocity, noteName, readVarLen } from '../src/smf.js';
+import { indexNotes, indexTracksOnly, applyVelocity, noteName, readVarLen } from '../src/smf.js';
 
 /** Build an SMF track from raw event bytes, prefixing the MTrk header. */
 function track(events) {
@@ -289,11 +289,55 @@ test('applyVelocity does not mutate the input buffer', () => {
   );
 });
 
+test('a payload with tracks but no MThd is still readable', () => {
+  // Some writers store the second copy of a performance as a bare run of MTrk
+  // chunks with proprietary header bytes in front. Refusing it would mean the
+  // edit reaches only one copy of the music.
+  const trk = track([
+    0x00, 0x99, 36, 100,
+    0x60, 0x89, 36, 0,
+    0x00, 0x99, 42, 90,
+    0x60, 0x89, 42, 0,
+  ]);
+  const junk = Uint8Array.from([0x00, 0x00, 0x00, 0x00, 0x01, 0x20]); // proprietary prefix
+  const bare = concat([junk, trk]);
+
+  // indexNotes must refuse it...
+  const refusal = indexNotes(bare.buffer.slice(0), 0, bare.length);
+  assert.match(refusal.error, /no MThd/);
+
+  // ...and indexTracksOnly must handle it.
+  const r = indexTracksOnly(bare.buffer.slice(0), 0, bare.length);
+  assert.equal(r.layout, 'tracks-only');
+  assert.equal(r.tracks, 1);
+  assert.deepEqual(r.notes.map((n) => [n.note, n.velocity, n.channel]), [
+    [36, 100, 9],
+    [42, 90, 9],
+  ]);
+});
+
+test('indexTracksOnly yields offsets that address the real velocity byte', () => {
+  const trk = track([0x00, 0x99, 36, 77, 0x60, 0x89, 36, 0]);
+  const bare = concat([Uint8Array.from([1, 2, 3, 4]), trk]);
+  const bytes = new Uint8Array(bare.buffer, bare.byteOffset, bare.byteLength);
+  const r = indexTracksOnly(bytes.buffer.slice(0), 0, bare.length);
+  assert.ok(r.notes.length === 1);
+  assert.equal(bytes[r.notes[0].velocityOffset], 77);
+});
+
+test('a payload with neither MThd nor MTrk reports nothing rather than guessing', () => {
+  const junk = new Uint8Array(512).fill(0x00);
+  const r = indexTracksOnly(junk.buffer, 0, junk.length);
+  assert.equal(r.notes.length, 0);
+  assert.equal(r.tracks, 0);
+});
+
 test('a truncated payload yields an error rather than a bogus index', () => {
   const buf = buildSty();
   assert.ok(indexNotes(buf, 0, 4).error);
   const { payloads } = findMidiPayloads(buf);
   assert.ok(indexNotes(buf, payloads[0].offset + 3, payloads[0].size).error);
 });
+
 
 
