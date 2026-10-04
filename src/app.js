@@ -533,20 +533,47 @@ function renderMap() {
 /** Stage a map operation, then redraw. Nothing is written until download. */
 function stageCasm(operation) {
   if (!state) return;
-  // A toggle that is already in the requested state is dropped rather than
-  // appended, so clicking a dot twice returns the file to exactly its original
-  // bytes instead of leaving two no-op operations behind.
+
   if (operation.op === 'channel') {
+    // One operation per cell, holding the state the user asked for. Appending
+    // instead would make a second click on the same dot a second operation rather
+    // than a reversal, and - worse - switching off a part that was already on by
+    // default would store "off" as if it were an edit, when the file already says
+    // off and there is nothing to write.
     const at = state.casmOps.findIndex(
       (o) => o.op === 'channel' && o.section === operation.section && o.channel === operation.channel,
     );
-    if (at >= 0) state.casmOps.splice(at, 1);
-    if (operation.on) state.casmOps.push(operation);
+    if (at >= 0) state.casmOps[at] = operation;
+    else state.casmOps.push(operation);
+    pruneCasmOps();
   } else {
     state.casmOps.push(operation);
   }
+
   renderMap();
   refresh();
+}
+
+/**
+ * Drop map operations that agree with the file as it already is.
+ *
+ * Without this, switching a part off and then on again would leave two operations
+ * behind that cancel out. The download would still be correct - they would be
+ * replayed in order - but the page would claim there were two pending edits when
+ * the file is byte-for-byte the original, and Revert would have something to undo
+ * that was never a change.
+ */
+function pruneCasmOps() {
+  const original = parseCasm(state.buffer);
+  if (!original) return;
+  state.casmOps = state.casmOps.filter((op) => {
+    if (op.op !== 'channel') return true;
+    const section = original.sections.find((s) => s.name === op.section);
+    // A cell whose section has been renamed or deleted cannot be compared, so it
+    // is kept and left for the writer to resolve.
+    if (!section) return true;
+    return section.channels.includes(op.channel) !== op.on;
+  });
 }
 
 // ---- panels -----------------------------------------------------------------
@@ -1176,16 +1203,20 @@ el.previewEdit.addEventListener('change', () => { if (player?.playing) { stopPla
 
 el.btnDownload.addEventListener('click', () => {
   if (!state) return;
+  const map = state.casmOps.length;
+  const notes = pendingCount();
   try {
     download(buildEdited(), editedName());
-    const map = state.casmOps.length;
-    const notes = pendingCount();
     const parts = [
       map ? `${map} map change${map === 1 ? '' : 's'}` : null,
       notes ? `${notes} note edit${notes === 1 ? '' : 's'}` : null,
-      !map && !notes ? `velocity set to ${el.velocity.value}` : null,
+      state.bulkVelocity !== null ? `velocity set to ${el.bulkVelocity}` : null,
     ].filter(Boolean);
-    say(`Wrote ${parts.join(' and ')} into ${editedName()}.`, 'ok');
+    // Saying "velocity set to 100" when nothing was pending would be a lie the
+    // user could check by loading the file and hearing no difference.
+    say(parts.length
+      ? `Wrote ${parts.join(' and ')} into ${editedName()}.`
+      : `No changes to write, so ${editedName()} is a copy of the original.`, 'ok');
   } catch (err) {
     say(`Could not write the file: ${err?.message ?? err}`, 'warn');
   }

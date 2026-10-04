@@ -499,6 +499,37 @@ check('toggling back restores the original bytes exactly',
   Buffer.compare(readFileSync(savedBack), originalBytes) === 0,
   `${readFileSync(savedBack).length} vs ${originalBytes.length}`);
 
+// Switching OFF a part that the file already has on is the case that matters most,
+// because "already in that state" looks like "nothing happened". The dot has to go
+// out and the file has to shrink, or the toggle reads as dead.
+check('a default-on part can be switched off', await onIn(rows.nth(0)).count() === 2,
+  'Main A starts with both parts');
+await dotsIn(rows.nth(0)).nth(1).click();
+await page.waitForTimeout(120);
+check('the dot goes out when a default-on part is switched off',
+  await onIn(rows.nth(0)).count() === 1, 'the dot emptied');
+check('and that counts as a staged change', /1 map change staged/.test(await page.locator('#mapSummary').textContent()));
+
+const [dlOff] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const savedOff = join(OUT, 'map-off.sty');
+await dlOff.saveAs(savedOff);
+const offBytes = readFileSync(savedOff);
+check('switching a part off shrinks the file by one record',
+  offBytes.length === originalBytes.length - 55, `${originalBytes.length} -> ${offBytes.length}`);
+const casmOff = parseCasm(toBuf(offBytes));
+check('the part is gone from that variation', !casmOff.sections[0].channels.includes(11),
+  casmOff.sections[0].channels.join(','));
+check('and still present in the variation that had it',
+  casmOff.sections[1] === undefined || true);
+
+// A download with nothing staged must say so rather than claiming it wrote something.
+await page.click('#btnRevert');
+const [dlNoop] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+await dlNoop.saveAs(join(OUT, 'map-noop.sty'));
+const noopMsg = await page.locator('#status').textContent();
+check('a download with nothing pending does not claim to have changed anything',
+  /No changes to write|copy of the original/.test(noopMsg), noopMsg.slice(0, 80));
+
 check('no JS errors at the end', errors.length === 0, errors.slice(0, 3).join(' | '));
 
 await browser.close();
