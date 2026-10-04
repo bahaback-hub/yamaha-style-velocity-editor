@@ -14,6 +14,7 @@
 
 const SFF_MAGIC = [0x53, 0x46, 0x46, 0x20]; // "SFF "
 const SFF2_MAGIC = [0x53, 0x46, 0x46, 0x32]; // "SFF2"
+const SMF_MAGIC = [0x4d, 0x54, 0x68, 0x64]; // "MThd"
 
 /**
  * Bytes [start, end) of a DataView as a string.
@@ -68,13 +69,23 @@ export function readSff(buffer) {
   const magic = [view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3)];
   const isSff2 = magic.every((b, i) => b === SFF2_MAGIC[i]);
   const isSff1 = magic.every((b, i) => b === SFF_MAGIC[i]);
-  if (!isSff1 && !isSff2) {
+  const isSmf = magic.every((b, i) => b === SMF_MAGIC[i]);
+  if (!isSff1 && !isSff2 && !isSmf) {
     const seen = String.fromCharCode(...magic).replace(/[^\x20-\x7e]/g, '?');
-    throw new Error(`Not a Yamaha SFF file (header reads "${seen}").`);
+    throw new Error(`Not a Yamaha SFF or MIDI file (header reads "${seen}").`);
   }
 
+  // A bare Standard MIDI File with a .STY extension is a real thing in the
+  // wild: exported style parts and several editor utilities produce one, with
+  // the drum performance in plain MTrk chunks. Treating the whole file as a
+  // single payload is the only correct reading - there is no container to walk.
+  const smfFormat = isSmf ? view.getUint16(8) : -1;
+  const smfTracks = isSmf ? view.getUint16(10) : -1;
+
   let cursor;
-  if (isSff2) {
+  if (isSmf) {
+    cursor = 0;
+  } else if (isSff2) {
     // SFF2 stores the header length as a 4-byte big-endian value AFTER the
     // magic, and that length counts the four length bytes themselves - a
     // declared 8 means 8 bytes of header total, i.e. 4 remaining after the
@@ -100,7 +111,7 @@ export function readSff(buffer) {
     // instead of reporting a valid file as having no MIDI data at all.
     chunks = readChunks(view, 4, view.byteLength);
   }
-  return { view, isSff2, chunks };
+  return { view, isSff2, isSmf, smfFormat, smfTracks, chunks };
 }
 
 /**
@@ -118,9 +129,23 @@ export function readSff(buffer) {
  * @returns {{version: 'SFF1'|'SFF2', payloadSize: number, payloads: {kind: string, offset: number, size: number, format: number, tracks: number}[]}}
  */
 export function findMidiPayloads(buffer) {
-  const { view, isSff2, chunks } = readSff(buffer);
+  const { view, isSff2, isSmf, smfFormat, smfTracks, chunks } = readSff(buffer);
   /** @type {{kind: string, offset: number, size: number, format: number, tracks: number}[]} */
   const payloads = [];
+
+  // A bare SMF: the whole file is the payload. Its length is the buffer, not a
+  // chunk length, and indexNotes stops at the last MTrk so any trailing
+  // proprietary chunk (CASM and friends) is ignored rather than misread.
+  if (isSmf) {
+    payloads.push({
+      kind: 'SMF',
+      offset: 0,
+      size: view.byteLength,
+      format: smfFormat,
+      tracks: smfTracks,
+    });
+    return { version: 'MIDI', container: 'bare-smf', payloadSize: view.byteLength, payloads };
+  }
 
   for (const chunk of chunks) {
     if (chunk.id !== 'Smed') continue;
@@ -148,6 +173,7 @@ export function findMidiPayloads(buffer) {
 
   return {
     version: isSff2 ? 'SFF2' : 'SFF1',
+    container: 'sff',
     payloadSize: payloads.reduce((a, p) => a + p.size, 0),
     payloads,
   };

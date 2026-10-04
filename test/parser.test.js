@@ -119,9 +119,9 @@ test('readSff accepts SFF1, which has no header length field', () => {
   assert.equal(indexNotes(buf, payloads[0].offset, payloads[0].size).notes.length, 1);
 });
 
-test('readSff rejects a non-SFF file with a readable message', () => {
+test('readSff rejects a file that is neither SFF nor MIDI', () => {
   const junk = new Uint8Array(64).fill(0x41).buffer;
-  assert.throws(() => readSff(junk), /Not a Yamaha SFF file/);
+  assert.throws(() => readSff(junk), /Not a Yamaha SFF or MIDI file/);
 });
 
 test('readChunks stops instead of emitting a chunk that runs past the end', () => {
@@ -330,6 +330,54 @@ test('a payload with neither MThd nor MTrk reports nothing rather than guessing'
   const r = indexTracksOnly(junk.buffer, 0, junk.length);
   assert.equal(r.notes.length, 0);
   assert.equal(r.tracks, 0);
+});
+
+test('a bare SMF with a .STY extension is read as one whole-file payload', () => {
+  // Regression guard, from a real file: "03~5-16 Karadeniz.T473.STY" starts
+  // with MThd, not SFF2. Several tools export style parts that way, and a
+  // reader that insists on the container magic rejects them outright even
+  // though the drum data is a perfectly ordinary MTrk.
+  //
+  // The statuses below are 0x91 and 0x9e - note-on on channels 2 and 15. The
+  // real track opens with sysex and control-change (0xBn) messages before any
+  // note, which is worth keeping in mind: a channel number in this file family
+  // does not imply the notes live on that channel.
+  const trk = track([
+    0x00, 0xb1, 0x07, 0x3d, // control change (volume) - must be skipped
+    0x00, 0x91, 36, 100,
+    0x60, 0x81, 36, 0,
+    0x00, 0x9e, 42, 90,
+    0x60, 0x8e, 42, 0,
+  ]);
+  const body = concat([mthd(1), trk]);
+  // A trailing proprietary chunk, as the real file has (CASM).
+  const casm = chunk('CASM', Uint8Array.from([1, 2, 3, 4]));
+  const file = concat([body, casm]);
+  const buf = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
+
+  const info = findMidiPayloads(buf);
+  assert.equal(info.container, 'bare-smf');
+  assert.equal(info.payloads.length, 1);
+  assert.equal(info.payloads[0].offset, 0);
+  assert.equal(info.payloads[0].size, buf.byteLength);
+
+  // The notes are found, and the leading control change is not mistaken for one.
+  const { notes, tracks } = indexNotes(buf, 0, buf.byteLength);
+  assert.equal(tracks, 1, 'must stop at the end of the MTrk, not the CASM chunk');
+  assert.deepEqual(notes.map((n) => [n.note, n.velocity, n.channel]), [
+    [36, 100, 1],
+    [42, 90, 14],
+  ]);
+
+  // And the offsets must address real velocity bytes.
+  const bytes = new Uint8Array(buf);
+  for (const n of notes) assert.equal(bytes[n.velocityOffset], n.velocity);
+
+  // Patching must leave the trailing chunk alone and keep the length.
+  const out = applyVelocity(buf, notes, 127);
+  assert.equal(out.byteLength, buf.byteLength);
+  const after = new Uint8Array(out);
+  assert.deepEqual([...after.slice(body.length)], [...file.slice(body.length)], 'CASM untouched');
 });
 
 test('a truncated payload yields an error rather than a bogus index', () => {

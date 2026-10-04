@@ -150,14 +150,21 @@ async function loadFile(file) {
     el.panelEdit.classList.remove('hidden');
     el.btnDownloadOrig.disabled = false;
 
-    // Say plainly what was and was not editable. A style usually carries the
-    // music twice and only editing one copy can be indistinguishable from the
-    // edit not working.
+    // Say plainly what was and was not editable. A container style usually
+    // carries the music twice and only editing one copy can be
+    // indistinguishable from the edit not working; a bare MIDI file has just
+    // the one, and claiming otherwise would be nonsense.
     const perPayload = payloads
       .map((p) => (p.ok ? `${p.kind} (${p.count} notes, ${p.layout})` : `${p.kind} not readable`))
       .join(', ');
     if (skipped.length === 0) {
-      say(`Loaded. Editing both copies: ${perPayload}.`, 'ok');
+      const copies = payloads.length;
+      say(
+        copies > 1
+          ? `Loaded. Both copies will be edited: ${perPayload}.`
+          : `Loaded. Single MIDI track, no SFF container: ${perPayload}.`,
+        'ok',
+      );
     } else {
       say(
         `Loaded, but ${skipped.map((p) => p.kind).join(' and ')} could not be read, ` +
