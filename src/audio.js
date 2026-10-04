@@ -71,22 +71,33 @@ export class Player {
    * @param {{tempoMap: any[], timeSignature: any, division: number}} timing
    * @param {(note: any) => number} toSeconds
    * @param {(note: any) => string} familyOf
-   * @param {(note: any) => number} velocityOf optional override, for previewing an edit
+   * @param {(note: any) => number|{velocity?: number, pitch?: number, durationTicks?: number}} [valuesOf]
+   *   optional override, for previewing a pending edit. Returning a bare number is
+   *   the common case and means "just the velocity"; returning an object previews
+   *   a retune or a new length as well.
    */
-  load(notes, timing, toSeconds, familyOf, velocityOf) {
+  load(notes, timing, toSeconds, familyOf, valuesOf) {
     this.queue = notes
-      .map((n) => ({
-        time: toSeconds(n.at),
-        note: n.note,
-        // A note with no note-off gets a short fallback rather than being
-        // dropped: a silent voice reads as "the tool is broken".
-        duration: Math.min(
-          n.durationTicks > 0 ? toSeconds(n.at + n.durationTicks) - toSeconds(n.at) : 0.25,
-          4,
-        ),
-        family: familyOf(n),
-        velocity: velocityOf ? velocityOf(n) : n.velocity,
-      }))
+      .map((n) => {
+        const raw = valuesOf ? valuesOf(n) : null;
+        // Normalise the two accepted shapes into one, so the mapping below does
+        // not have to care which the caller used.
+        const over = raw !== null && typeof raw === 'object'
+          ? raw
+          : (raw === null || raw === undefined ? null : { velocity: raw });
+        const velocity = over?.velocity ?? n.velocity;
+        const pitch = over?.pitch ?? n.note;
+        const ticks = over?.durationTicks ?? n.durationTicks;
+        return {
+          time: toSeconds(n.at),
+          note: pitch,
+          // A note with no note-off gets a short fallback rather than being
+          // dropped: a silent voice reads as "the tool is broken".
+          duration: Math.min(ticks > 0 ? toSeconds(n.at + ticks) - toSeconds(n.at) : 0.25, 4),
+          family: familyOf(n),
+          velocity,
+        };
+      })
       .sort((a, b) => a.time - b.time);
     this.duration = this.queue.length ? this.queue[this.queue.length - 1].time + 0.5 : 0;
     this.timing = timing;

@@ -151,6 +151,90 @@ output { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 15
 
 .summary { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
 .summary b { color: var(--text); }
+
+/* ---- editor ---------------------------------------------------------------
+   The roll and the lane are canvases on a dark plate, sized in CSS pixels and
+   scaled by the class for device pixel ratio. Heights are fixed rather than
+   intrinsic because both classes size their backing store from clientWidth and
+   clientHeight - an auto-height canvas would measure 0 and draw nothing. */
+
+.block-editor { margin-top: 24px; }
+
+.editor-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 12px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+}
+
+.editor-bar select { min-width: 150px; }
+.counter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.roll-wrap { position: relative; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.roll, .velane { display: block; width: 100%; touch-action: none; }
+.roll { height: 340px; border-bottom: 1px solid var(--line); }
+.velane { height: 130px; }
+
+.roll-empty {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: var(--dim); font-size: 13px; pointer-events: none; background: var(--bg);
+}
+
+.hint-daw { margin: 8px 0 0; line-height: 1.6; }
+
+/* Operations read as one control strip per family, so the numbers a transform
+   needs sit next to its own Run button rather than in a shared column. */
+.ops { margin-top: 18px; display: grid; gap: 8px; }
+.ops-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; background: var(--surface-2);
+  border: 1px solid var(--line-soft); border-radius: 8px;
+}
+.ops-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--dim); min-width: 52px;
+}
+.ops-row .inline { font-size: 12px; color: var(--muted); gap: 6px; }
+.ops-row input[type="text"] { width: 86px; }
+.ops-row input[type="range"] { width: 130px; }
+.ops-row output { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+
+.btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+
+.voice.active { box-shadow: inset 2px 0 0 var(--accent); }
+.voice.active .voice-name span::after {
+  content: "editing"; margin-left: 8px; font-size: 10px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent);
+}
+
+input[type="text"], input[type="number"] {
+  background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  /* Named explicitly rather than `font: inherit`. A form control given the
+     shorthand can end up on the platform's own UI font, and monospaced figures
+     also line up across a row of numeric fields. */
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+input[type="text"]:focus, input[type="number"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The native spinner eats ~20px and was enough to clip a three-digit value down
+   to two, which read as a different number rather than as a cut-off one. These
+   fields are typed or nudged, not clicked through, so the spinner is no use here. */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.preset-item { display: inline-flex; align-items: stretch; gap: 0; }
+.preset-item .btn { border-radius: 6px 0 0 6px; }
+.preset-item .btn:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+
+@media (max-width: 720px) {
+  .roll { height: 260px; }
+  .velane { height: 110px; }
+  .ops-label { min-width: 100%; }
+}
 .declared { display: flex; flex-wrap: wrap; gap: 6px; }
 .decl-tag { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); }
 .decl-tag b { color: var(--text); font-weight: 600; }

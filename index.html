@@ -4,14 +4,14 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Yamaha Style Velocity Editor</title>
-<meta name="description" content="Inspect and edit drum-note velocity inside Yamaha .STY style files, with playback. Runs entirely in your browser." />
+<meta name="description" content="Inspect and edit drum-note velocity, pitch and length inside Yamaha .STY style files, with a piano roll and playback. Runs entirely in your browser." />
 <link rel="stylesheet" href="src/app.css" />
 </head>
 <body>
 <div class="app">
   <header class="bar">
-    <h1>Style Velocity Editor</h1>
-    <p class="tag">Yamaha .STY &middot; inspect, audition, edit &middot; nothing leaves this device</p>
+    <h1>Style Editor</h1>
+    <p class="tag">Yamaha .STY &middot; piano roll, velocity, length &middot; nothing leaves this device</p>
   </header>
 
   <!-- Load -->
@@ -53,10 +53,128 @@
         <input type="range" id="volume" min="0" max="100" value="80" />
       </label>
       <span class="clock" id="clock">0.0s</span>
-      <label class="check" title="Play the pending edit instead of the file's own velocities">
+      <label class="check" title="Play the pending edit instead of the file's own values">
         <input type="checkbox" id="previewEdit" checked /> Preview edit
       </label>
       <button class="btn btn-ghost" id="btnPlayOriginal">Audition original</button>
+    </div>
+
+    <!-- Editor -->
+    <div class="block block-editor" id="blockEditor">
+      <div class="block-head">
+        <h2>Editor</h2>
+        <span class="hint" id="editorHint"></span>
+      </div>
+
+      <div class="editor-bar">
+        <label class="inline">
+          Part
+          <select id="partSelect"></select>
+        </label>
+        <label class="inline">
+          Snap
+          <select id="snap">
+            <option value="0" selected>Off</option>
+            <option value="120">1/32</option>
+            <option value="240">1/16</option>
+            <option value="480">1/8</option>
+            <option value="960">1/4</option>
+            <option value="1920">1/2</option>
+          </select>
+        </label>
+        <label class="check" title="Scroll the roll to follow the playhead">
+          <input type="checkbox" id="followPlay" checked /> Follow
+        </label>
+        <button class="btn btn-ghost btn-sm" id="btnFit">Fit</button>
+        <span class="grow"></span>
+        <span class="counter" id="editCount">No pending edits</span>
+        <button class="btn btn-ghost btn-sm" id="btnRevert" disabled>Revert</button>
+      </div>
+
+      <div class="roll-wrap">
+        <canvas id="roll" class="roll"></canvas>
+        <canvas id="velane" class="velane"></canvas>
+        <div class="roll-empty" id="rollEmpty">This part has no notes.</div>
+      </div>
+
+      <p class="hint hint-daw">
+        Drag a bar in the lane to set velocity &middot; drag a note up or down to retune
+        &middot; drag its right edge to change length &middot; click empty space and drag to pan
+        &middot; wheel to zoom, shift+wheel for height &middot; double-click to seek
+      </p>
+
+      <!-- Numeric fields below are type="text" with inputmode="numeric", not
+           type="number". A number input on this platform renders its digits with
+           broken glyphs - "115" comes out looking like ">>o" - regardless of the
+           font, the appearance or the line-height, while the same value in a text
+           input is perfectly legible. inputmode still gives a numeric keypad on a
+           phone, and every value is read through Number() and clamped anyway, so
+           nothing was lost by not using the number type. -->
+      <div class="ops" role="group" aria-label="Velocity operations">
+        <div class="ops-row">
+          <span class="ops-label">Set</span>
+          <div class="preset">
+            <button class="chip" data-v="127">127 loud</button>
+            <button class="chip" data-v="110">110</button>
+            <button class="chip" data-v="100">100 default</button>
+            <button class="chip" data-v="80">80 soft</button>
+            <button class="chip" data-v="40">40 ghost</button>
+          </div>
+          <label class="inline">
+            <input type="range" id="velocity" min="1" max="127" value="100" />
+            <output id="velocityOut">100</output>
+          </label>
+          <button class="btn btn-sm" id="btnApplySet">Apply to part</button>
+        </div>
+
+        <div class="ops-row">
+          <span class="ops-label">Scale</span>
+          <label class="inline">% <input type="text" inputmode="numeric" id="opScale" value="115" /></label>
+          <button class="btn btn-sm" data-op="scale">Run</button>
+
+          <span class="ops-label">Offset</span>
+          <label class="inline">&plusmn; <input type="text" inputmode="numeric" id="opOffset" value="10" /></label>
+          <button class="btn btn-sm" data-op="offset">Run</button>
+        </div>
+
+        <div class="ops-row">
+          <span class="ops-label">Humanize</span>
+          <label class="inline">&plusmn; <input type="text" inputmode="numeric" id="opHuman" value="12" /></label>
+          <button class="btn btn-sm" data-op="humanize">Run</button>
+
+          <span class="ops-label">Random</span>
+          <label class="inline">
+            <input type="text" inputmode="numeric" id="opRandLow" value="70" />
+            to
+            <input type="text" inputmode="numeric" id="opRandHigh" value="110" />
+          </label>
+          <button class="btn btn-sm" data-op="random">Run</button>
+        </div>
+
+        <div class="ops-row">
+          <span class="ops-label">Curve</span>
+          <label class="inline">
+            pivot <input type="text" inputmode="decimal" id="opCurvePivot" value="0.5" />
+          </label>
+          <label class="inline">
+            before <input type="text" inputmode="numeric" id="opCurveBelow" value="6" />
+          </label>
+          <label class="inline">
+            after <input type="text" inputmode="numeric" id="opCurveAbove" value="-6" />
+          </label>
+          <button class="btn btn-sm" data-op="curve">Run</button>
+
+          <span class="ops-label">Accent</span>
+          <label class="inline">
+            above <input type="text" inputmode="numeric" id="opAccentAbove" value="100" />
+          </label>
+          <label class="inline">
+            by <input type="text" inputmode="numeric" id="opAccentBy" value="12" />
+          </label>
+          <button class="btn btn-sm" data-op="accent">Run</button>
+        </div>
+      </div>
+      <div class="summary" id="summary"></div>
     </div>
 
     <!-- Timeline -->
@@ -72,29 +190,16 @@
     <div class="block">
       <div class="block-head">
         <h2>Parts</h2>
-        <span class="hint">Click a row to include or exclude it from the edit</span>
+        <span class="hint">Click a row to include or exclude it from playback and from the bulk operations</span>
       </div>
       <div class="voices" id="voices"></div>
     </div>
 
-    <!-- Velocity -->
+    <!-- Selection range + save -->
     <div class="block">
       <div class="block-head">
-        <h2>Velocity</h2>
-        <span class="hint">Applies to every selected note in the selected parts</span>
-      </div>
-      <div class="vel">
-        <label class="inline grow">
-          New velocity <output id="velocityOut">100</output>
-          <input type="range" id="velocity" min="1" max="127" value="100" />
-        </label>
-        <div class="preset">
-          <button class="chip" data-v="127">127 loud</button>
-          <button class="chip" data-v="110">110</button>
-          <button class="chip" data-v="100">100 default</button>
-          <button class="chip" data-v="80">80 soft</button>
-          <button class="chip" data-v="40">40 ghost</button>
-        </div>
+        <h2>Selection</h2>
+        <span class="hint">Narrows every operation and the download to a pitch range</span>
       </div>
       <div class="field narrow">
         <label for="noteLow">Lowest pitch</label>
@@ -106,7 +211,24 @@
         <button class="btn" id="btnDownload" disabled>Download edited .STY</button>
         <button class="btn btn-ghost" id="btnDownloadOrig" disabled>Download original</button>
       </div>
-      <div class="summary" id="summary"></div>
+    </div>
+
+    <!-- Presets -->
+    <div class="block">
+      <div class="block-head">
+        <h2>Presets</h2>
+        <span class="hint">Stored in this browser only, never uploaded</span>
+      </div>
+      <div class="row">
+        <input type="text" id="presetName" placeholder="Preset name" maxlength="40" />
+        <button class="btn btn-sm" id="btnPresetSave">Save current</button>
+      </div>
+      <div class="presets" id="presetList"></div>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" id="btnJsonExport">Export edits as JSON</button>
+        <button class="btn btn-ghost btn-sm" id="btnJsonImport">Import JSON</button>
+        <input type="file" id="jsonFile" accept=".json,application/json" hidden />
+      </div>
     </div>
 
     <!-- Declared structure -->
