@@ -61,10 +61,20 @@ export function readVarLen(view, p, limit) {
 /**
  * Index every note-on event in an SMF payload.
  *
+ * Besides offsets and velocities, this collects what a viewer needs in order to
+ * place notes in time and play them back:
+ *   - `at` is the absolute tick, not the delta, so notes can be ordered and
+ *     laid out without the caller re-walking the track;
+ *   - `durationTicks` comes from matching each note-off, so playback knows how
+ *     long to hold a note;
+ *   - `tempoMap` records every set-tempo meta event, because tempo can change
+ *     mid-track and a single tempo value would drift audibly;
+ *   - `timeSignature` drives bar numbering.
+ *
  * @param {ArrayBuffer} buffer
  * @param {number} payloadOffset absolute offset of the SMF inside the file
  * @param {number} payloadSize
- * @returns {{notes: NoteHit[], tracks: number, division: number, layout: 'smf'|'tracks-only', error?: string}}
+ * @returns {{notes: NoteHit[], tracks: number, division: number, layout: 'smf'|'tracks-only', tempoMap: TempoPoint[], timeSignature: TimeSignature, lengthTicks: number, error?: string}}
  *
  * @typedef {object} NoteHit
  * @property {number} velocityOffset absolute file offset of the velocity byte
@@ -72,25 +82,48 @@ export function readVarLen(view, p, limit) {
  * @property {number} note 0-127
  * @property {number} channel 0-15
  * @property {number} track
- * @property {number} tick delta-time in ticks
+ * @property {number} tick delta-time in ticks (kept for reference)
+ * @property {number} at absolute tick from the start of the payload
+ * @property {number} durationTicks 0 when no note-off was found
+ *
+ * @typedef {{tick: number, usPerQuarter: number}} TempoPoint
+ * @typedef {{numerator: number, denominator: number}} TimeSignature
  */
 export function indexNotes(buffer, payloadOffset, payloadSize) {
   const view = new DataView(buffer);
   /** @type {NoteHit[]} */
   const notes = [];
   const limit = payloadOffset + payloadSize;
+  const empty = (error) => ({
+    notes,
+    tracks: 0,
+    division: 0,
+    layout: 'smf',
+    tempoMap: [],
+    timeSignature: { numerator: 4, denominator: 4 },
+    lengthTicks: 0,
+    error,
+  });
 
-  if (payloadOffset + 8 > limit) {
-    return { notes, tracks: 0, division: 0, layout: 'smf', error: 'payload too short for an SMF header' };
-  }
+  if (payloadOffset + 8 > limit) return empty('payload too short for an SMF header');
   if (str(view, payloadOffset, payloadOffset + 4) !== 'MThd') {
-    return { notes, tracks: 0, division: 0, layout: 'smf', error: 'payload is not an SMF (no MThd)' };
+    return empty('payload is not an SMF (no MThd)');
   }
 
   const division = view.getUint16(payloadOffset + 12);
+  /** @type {TempoPoint[]} */
+  const tempoMap = [{ tick: 0, usPerQuarter: 500000 }];
+  /** @type {TimeSignature} */
+  let timeSignature = { numerator: 4, denominator: 4 };
 
   let p = payloadOffset + 8 + view.getUint32(payloadOffset + 4);
   let trackIndex = 0;
+  let lengthTicks = 0;
+  // Note-ons still waiting for their note-off, keyed by channel and pitch.
+  // Yamaha writes overlapping same-pitch hits on the drum channels, so the
+  // oldest is released first - which is what a player does too.
+  /** @type {Map<string, NoteHit[]>} */
+  const pending = new Map();
 
   while (p + 8 <= limit && str(view, p, p + 4) === 'MTrk') {
     const trackLen = view.getUint32(p + 4);
@@ -100,12 +133,15 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
 
     let cursor = trackStart;
     let status = 0;
+    let abs = 0;
 
     while (cursor < trackEnd) {
       const delta = readVarLen(view, cursor, trackEnd);
       if (!delta) break;
       cursor = delta.next;
       const tick = delta.value;
+      abs += tick;
+      if (abs > lengthTicks) lengthTicks = abs;
 
       let b = view.getUint8(cursor);
       if (b < 0x80) {
@@ -117,14 +153,29 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
         if (b < 0xf0) {
           status = b;
         } else if (b === 0xff) {
-          // Meta event: skip type + length + body.
           const type = view.getUint8(cursor);
           cursor++;
           const len = readVarLen(view, cursor, trackEnd);
           if (!len) break;
-          cursor = len.next + len.value;
+          // The body starts *after* the variable-length length field. Reading it
+          // from `cursor` points at the length bytes themselves, which silently
+          // yields a nonsense tempo and time signature.
+          const body = len.next;
+          cursor = body + len.value;
           if (cursor > trackEnd) break;
-          void type;
+          if (type === 0x51 && len.value === 3) {
+            const usPerQuarter =
+              (view.getUint8(body) << 16) | (view.getUint8(body + 1) << 8) | view.getUint8(body + 2);
+            // A tempo declared at tick 0 is the real one, not a second opinion.
+            if (abs === 0) tempoMap[0] = { tick: 0, usPerQuarter };
+            else tempoMap.push({ tick: abs, usPerQuarter });
+          } else if (type === 0x58 && len.value >= 2) {
+            const denom = view.getUint8(body + 1);
+            timeSignature = {
+              numerator: view.getUint8(body),
+              denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
+            };
+          }
           continue;
         } else if (b === 0xf0 || b === 0xf7) {
           const len = readVarLen(view, cursor, trackEnd);
@@ -140,22 +191,36 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
       }
 
       const type = b & 0xf0;
+      const channel = b & 0x0f;
       if (type === 0x90 || type === 0x80) {
         if (cursor + 1 >= trackEnd) break;
         const note = view.getUint8(cursor);
         const velocity = view.getUint8(cursor + 1);
+        const key = `${channel}:${note}`;
         if (type === 0x90 && velocity > 0) {
-          notes.push({
+          /** @type {NoteHit} */
+          const hit = {
             // cursor is already an absolute file offset: the walk starts at
             // payloadOffset and never rebases. Adding payloadOffset again
             // shifts every write into the wrong byte.
             velocityOffset: cursor + 1,
             velocity,
             note,
-            channel: b & 0x0f,
+            channel,
             track: trackIndex,
             tick,
-          });
+            at: abs,
+            durationTicks: 0,
+          };
+          notes.push(hit);
+          const list = pending.get(key);
+          if (list) list.push(hit);
+          else pending.set(key, [hit]);
+        } else {
+          // A note-off is either 0x8n or a 0x9n with velocity 0.
+          const list = pending.get(key);
+          const hit = list?.shift();
+          if (hit) hit.durationTicks = Math.max(0, abs - hit.at);
         }
         cursor += 2;
       } else {
@@ -169,7 +234,61 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
     trackIndex++;
   }
 
-  return { notes, tracks: trackIndex, division, layout: 'smf' };
+  return { notes, tracks: trackIndex, division, layout: 'smf', tempoMap, timeSignature, lengthTicks };
+}
+
+/**
+ * Convert an absolute tick to seconds using a tempo map.
+ *
+ * Tempo can change mid-track, so this integrates piecewise rather than using a
+ * single rate. Without that, a style with a ritardando would drift audibly
+ * against the grid the timeline draws.
+ *
+ * The tempo map holds microseconds per *quarter note*, so the tick count has to
+ * be converted to quarters with the file's division first. Dividing ticks
+ * straight by microseconds-per-quarter assumes one tick per quarter and produces
+ * a duration off by the division factor - about two minutes reported as
+ * fifty-seven hours.
+ *
+ * @param {TempoPoint[]} tempoMap
+ * @param {number} tick
+ * @param {number} [division] ticks per quarter note
+ * @returns {number} seconds
+ */
+export function tickToSeconds(tempoMap, tick, division = 480) {
+  if (tick <= 0 || division <= 0) return 0;
+  const perQuarter = (us) => us / 1e6;
+  let seconds = 0;
+  let cursorTick = 0;
+  let usPerQuarter = tempoMap.length ? tempoMap[0].usPerQuarter : 500000;
+  for (const point of tempoMap) {
+    if (point.tick >= tick) break;
+    if (point.tick > cursorTick) {
+      seconds += ((point.tick - cursorTick) / division) * perQuarter(usPerQuarter);
+      cursorTick = point.tick;
+    }
+    usPerQuarter = point.usPerQuarter;
+  }
+  seconds += ((tick - cursorTick) / division) * perQuarter(usPerQuarter);
+  return seconds;
+}
+
+/**
+ * Ticks in one bar.
+ *
+ * A time signature's numerator counts beats and its denominator names the note
+ * value that gets one beat, so a bar holds `numerator * (4 / denominator)`
+ * quarter notes - 4/4 is 4 quarters, 6/8 is 3, 10/16 is 2.5. Dividing by the
+ * denominator instead of multiplying would put 6/8 at 12 quarters per bar and
+ * produce a grid wildly the wrong size.
+ *
+ * @param {{numerator: number, denominator: number}} timeSignature
+ * @param {number} division ticks per quarter note from the file header
+ */
+export function ticksPerBar(timeSignature, division = 480) {
+  const den = timeSignature.denominator > 0 ? timeSignature.denominator : 4;
+  const quarters = (timeSignature.numerator * 4) / den;
+  return quarters * division;
 }
 
 /**
@@ -189,8 +308,15 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
   const end = payloadOffset + payloadSize;
   /** @type {NoteHit[]} */
   const notes = [];
+  /** @type {TempoPoint[]} */
+  const tempoMap = [{ tick: 0, usPerQuarter: 500000 }];
+  /** @type {TimeSignature} */
+  let timeSignature = { numerator: 4, denominator: 4 };
+  /** @type {Map<string, NoteHit[]>} */
+  const pending = new Map();
   let p = payloadOffset;
   let trackIndex = 0;
+  let lengthTicks = 0;
 
   while (p + 8 <= end) {
     if (str(view, p, p + 4) !== 'MTrk') {
@@ -204,10 +330,13 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
 
     let cursor = trackStart;
     let status = 0;
+    let abs = 0;
     while (cursor < trackEnd) {
       const delta = readVarLen(view, cursor, trackEnd);
       if (!delta) break;
       cursor = delta.next;
+      abs += delta.value;
+      if (abs > lengthTicks) lengthTicks = abs;
 
       let b = view.getUint8(cursor);
       if (b < 0x80) {
@@ -218,10 +347,25 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
         if (b < 0xf0) {
           status = b;
         } else if (b === 0xff) {
+          const type = view.getUint8(cursor);
           const len = readVarLen(view, cursor + 1, trackEnd);
           if (!len) break;
-          cursor = len.next + len.value;
+          // Same offset rule as the header path: after the length field.
+          const body = len.next;
+          cursor = body + len.value;
           if (cursor > trackEnd) break;
+          if (type === 0x51 && len.value === 3) {
+            const usPerQuarter =
+              (view.getUint8(body) << 16) | (view.getUint8(body + 1) << 8) | view.getUint8(body + 2);
+            if (abs === 0) tempoMap[0] = { tick: 0, usPerQuarter };
+            else tempoMap.push({ tick: abs, usPerQuarter });
+          } else if (type === 0x58 && len.value >= 2) {
+            const denom = view.getUint8(body + 1);
+            timeSignature = {
+              numerator: view.getUint8(body),
+              denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
+            };
+          }
           continue;
         } else if (b === 0xf0 || b === 0xf7) {
           const len = readVarLen(view, cursor, trackEnd);
@@ -236,19 +380,31 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
       }
 
       const type = b & 0xf0;
+      const channel = b & 0x0f;
       if (type === 0x90 || type === 0x80) {
         if (cursor + 1 >= trackEnd) break;
         const note = view.getUint8(cursor);
         const velocity = view.getUint8(cursor + 1);
+        const key = `${channel}:${note}`;
         if (type === 0x90 && velocity > 0) {
-          notes.push({
+          /** @type {NoteHit} */
+          const hit = {
             velocityOffset: cursor + 1,
             velocity,
             note,
-            channel: b & 0x0f,
+            channel,
             track: trackIndex,
             tick: delta.value,
-          });
+            at: abs,
+            durationTicks: 0,
+          };
+          notes.push(hit);
+          const list = pending.get(key);
+          if (list) list.push(hit);
+          else pending.set(key, [hit]);
+        } else {
+          const hit = pending.get(key)?.shift();
+          if (hit) hit.durationTicks = Math.max(0, abs - hit.at);
         }
         cursor += 2;
       } else {
@@ -261,7 +417,7 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
     trackIndex++;
   }
 
-  return { notes, tracks: trackIndex, division: 0, layout: 'tracks-only' };
+  return { notes, tracks: trackIndex, division: 0, layout: 'tracks-only', tempoMap, timeSignature, lengthTicks };
 }
 
 function str(view, start, end) {

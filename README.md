@@ -1,29 +1,36 @@
 # Yamaha Style Velocity Editor
 
-Edit drum-note **velocity** inside Yamaha `.STY` style files — in the browser,
-with no server and no upload.
+Inspect, audition and edit drum-note **velocity** inside Yamaha `.STY` style
+files — in the browser, with no server and no upload.
 
 Built for PSR-A5000, Genos and other arrangers that read SFF2 styles, but the
-reader also accepts SFF1.
+reader also accepts SFF1 and the bare-MIDI `.STY` exports that style utilities
+produce.
 
 ---
 
 ## What it does
 
 1. You drop a `.STY` file onto the page.
-2. The tool walks the container, finds the embedded MIDI, and lists every
-   note-on event with its channel, pitch and current velocity.
-3. You pick which channels and which pitches to touch, choose a velocity from
-   1–127, and see exactly how many notes will change before anything happens.
-4. You download the edited style.
-
-The original file is never modified. The download is a new file with `-vel`
-appended to its name.
+2. It reads the container, indexes every note-on with its channel, pitch,
+   velocity and position in time, and reads the style's declared part names and
+   sections out of the `CASM` chunk.
+3. You get four views:
+   - **Timeline** — one lane per part across the bar grid, with blocks marked
+     where the sounding parts change.
+   - **Parts** — one row per channel with pitch range, note count and velocity
+     spread. Click a row to include or exclude it.
+   - **Velocity** — set a value from 1 to 127 for the selected parts and pitch
+     range, with a live count of what will change.
+   - **Declared sections** — the section names the style advertises.
+4. You press **Play** and hear the result. Velocity maps to amplitude, so a
+   value of 40 is audible as a ghost note and 127 as a full hit.
+5. You download the edited style. The original file is never modified.
 
 ## Running it
 
-Open `index.html` in a browser. That is the whole procedure — there is no build
-step and no dependency to install for normal use.
+Open `index.html` in a browser. There is no build step and no dependency to
+install for normal use.
 
 If your browser blocks ES modules from `file://`, serve the folder instead:
 
@@ -37,95 +44,139 @@ The file is read with `FileReader`/`ArrayBuffer` and never leaves the tab. The
 page makes no network requests after loading. That is verifiable: open the
 browser's network panel and watch it stay empty while you edit.
 
+## About the playback sound
+
+Playback is a synthesiser, not a sound bank. The styles reference Genos and PSR
+voices (`D:/MULTI PAD/GuitarPhrase/...`) that are not redistributable, so the
+instrument's actual timbres cannot be reproduced here.
+
+What playback *is* faithful about is dynamics — velocity drives amplitude
+exactly, on a squared curve — so an edit is judgeable by ear. What it is not is
+timbre: a `NylonGtr` part will not sound like a nylon guitar.
+
+Drum parts get pitch-aware percussion: kick, snare, hats and cymbals are
+distinguished by MIDI note number, so a drum pattern is recognisable and its
+accents are audible. Pitched parts get a short synth voice chosen per part
+family.
+
 ## How it works
 
-A `.STY` is an **SFF** container: a header followed by chunks, each a 4-character
-id and a 4-byte big-endian length.
+### Two shapes of file
+
+A `.STY` may be either an SFF container or a plain Standard MIDI File:
 
 ```
-SFF2 header  (magic + header length)
+SFF2 header
   Smed  <- MIDI data
     MID  <- the performance as authored
     MER  <- the performance as played back
 ```
 
-Each of `MID` and `MER` holds a Standard MIDI File. A note-on event is three
-bytes — `0x9n`, pitch, velocity — so editing velocity means writing one byte.
+or
 
-Three details make this less trivial than it sounds, and all three are covered by
-tests:
+```
+MThd
+  MTrk  <- one flat performance, every part on its own channel
+  CASM  <- declared section names and part names
+  OTSc  <- per-voice parameter tables
+```
 
-- **SFF2's header length counts its own four length bytes.** Adding the raw
-  value to `8` overshoots by four and lands in the middle of a chunk.
-- **Three-character chunk ids are null-padded** on disk, so the id on the wire is
-  `MID\0`, not `MID`.
-- **MIDI running status** means a track can be a run of bare note numbers with no
-  status byte, and meta events carry a variable-length body that has to be
-  skipped whole or the parser starts inventing notes.
+Both are read. The bare-MIDI shape is not hypothetical: a collection of 191
+exported `.T473.STY` files, every one of them of this form.
 
 ### Both copies are patched
 
-A style carries the same performance twice. Newer arrangers read `MER`, older
-ones read `MID`. Editing only one means the change is silent on half the
-hardware in the family, so the tool patches every payload it finds and the test
-suite asserts the two stay in sync.
+A container style carries the same performance twice. Newer arrangers read
+`MER`, older ones read `MID`. Editing only one means the change is silent on half
+the hardware in the family, so every payload found is patched. Not every writer
+puts a standard `MThd` in the second copy — a `MER` payload can be bare `MTrk`
+chunks behind proprietary header bytes — so `indexTracksOnly` handles that too.
 
-Not every writer puts a standard `MThd` header in the second copy — a `MER`
-payload can be a bare run of `MTrk` chunks behind a few proprietary bytes. Those
-are read too, via `indexTracksOnly`.
+If a payload still cannot be read, the page names it and warns that the edit will
+only reach the readable copy, rather than silently doing half a job.
+
+### Sections are declared, not recoverable
+
+`CASM` lists the section names the original style advertises — `Main A`,
+`Fill In AA`, `Intro B`, `Ending C` and so on. It does **not** record where those
+sections start in time, because these exports flatten the performance into one
+timeline. So the notes are grouped by part, and the timeline's "blocks" are
+inferred from where the sounding parts change. Both are labelled as such in the
+interface.
+
+`Bridge` appears in the declared list only if the style declares one; most of
+this collection does not.
 
 ### Nothing is patched silently
 
-If a payload cannot be read at all, the page says so in plain language and
-names it, because "the edit did nothing" is otherwise indistinguishable from a
-bug. It reports which copy the change reached and warns that the instrument may
-still play the untouched copy. The download stays available for the copy that
-*was* readable, rather than refusing outright.
+The patcher writes single bytes into a copy of the input. The container header,
+chunk lengths and all metadata are carried over verbatim, because the player
+validates the container and rejects a style whose declared lengths disagree with
+its contents. Tests assert the output is byte-for-byte the same length as the
+input and that only the intended bytes differ.
 
-### Nothing else is touched
+### Time handling
 
-The patcher writes specific bytes into a copy of the input. The container
-header, chunk lengths and all metadata are carried over verbatim, because the
-player validates the container and rejects a style whose declared lengths
-disagree with its contents. A test asserts the output is byte-for-byte the same
-length as the input and that only the intended bytes differ.
+Three things in the time domain are easy to get wrong, and each had a test
+written after it was got wrong:
+
+- **Tempo is microseconds per quarter, not per tick.** Dividing ticks straight by
+  that value reports a two-minute performance as fifty-seven hours. The file's
+  `division` has to be applied first.
+- **A time signature's numerator counts beats and its denominator names the note
+  value for one beat**, so a bar holds `numerator * 4 / denominator` quarters:
+  6/8 is three quarters, 10/16 is two and a half. Dividing by the denominator
+  instead puts 6/8 at twelve quarters per bar.
+- **Meta event bodies start after the variable-length length field.** Reading from
+  the length bytes themselves yields a plausible-looking but wrong tempo and
+  meter.
+
+A declared meter that would imply an absurd bar count is replaced by 4/4 and the
+substitution is reported, and the grid is capped so a bad decode cannot ask the
+DOM for hundreds of thousands of nodes.
 
 ## Tests
 
 ```sh
-npm test                    # 19 parser tests
-npx playwright install chromium   # once, for the browser check
-npm run serve               # in one terminal
-node test/ui.e2e.mjs        # 18 browser checks
+npm test                       # 48 parser, structure and audio tests
+npx playwright install chromium  # once, for the browser checks
+npm run serve                  # in one terminal
+npm run test:browser           # 48 browser checks across two files
 ```
 
-The parser tests run against a synthetic style built in the test file rather
-than a real one. That is deliberate: they assert exact byte offsets, so a
+The parser tests run against synthetic fixtures built in the test files rather
+than real styles. That is deliberate: they assert exact byte offsets, so a
 regression shows up as a wrong offset rather than a subtly wrong file that only
-fails on hardware.
+fails on hardware. Real Yamaha files are not committed to this repository.
 
-The browser check drives the real page, downloads a file, and re-parses it to
-confirm the bytes. It also covers a headerless `MER`, and a payload that cannot
-be read at all — the case where the tool has to admit it can only reach one
-copy. Plus a regression guard that the original file on disk is unchanged.
+`test/audio.test.js` drives the player against a stubbed `AudioContext`, which is
+the only way to assert the scheduling maths — velocity-to-gain curve, voice cap,
+envelopes — without a sound card.
+
+`test/inspect.e2e.mjs` and `test/ui.e2e.mjs` drive the real page: they upload a
+file, play it, move the playhead, download the result and re-parse it. Counting
+audio nodes from the page proved unreliable (a subclassed `AudioContext` is not
+always the one the engine ends up calling), so the browser tests assert
+observable behaviour — clock, playhead, transport state — and leave the audio
+parameters to the unit tests.
 
 ## Limitations — please read
 
-- **Untested against a real `.STY` file.** The parser is built from the
-  documented SFF/SMF layout and verified against a synthetic fixture, because no
-  sample style was available during development. The container handling for
-  styles that nest MIDI somewhere other than `Smed` is not covered.
-- **Velocity only.** Timbre, length, note events themselves and the pattern
-  section are out of scope.
-- **It flattens dynamics by design.** Setting every selected note to one value
-  removes the original accent pattern within that selection. Narrow the pitch or
-  channel range if you only want one drum part.
-- **No undo in the page.** Re-download the original if you want to compare.
-- **Note ranges are shown C-1 to G9.** Your file may use a subset; the UI
-  reports what is actually present rather than assuming GM drum mapping.
+- **No SFF2 `Sdst` section matrix.** Real arranger styles keep their section
+  layout in `Sdst`, which would give exact per-section note attribution. None
+  was available during development, so it is not implemented rather than
+  implemented and guessed.
+- **Timbre is an approximation**, as described above.
+- **Velocity only.** Timbre, note length and the pattern section are out of
+  scope.
+- **Editing flattens dynamics by design.** Setting every selected note to one
+  value removes the original accent pattern within that selection. Narrow the
+  pitch or part range if you only want one drum part.
 - **Metadata is not rewritten.** Name, category and part names stay as they
-  were. If you need to rename a style, do that in the arranger's own editor.
+  were. Rename a style in the arranger's own editor.
+- **No undo in the page.** Re-download the original to compare.
 
 ## License
 
 MIT
+
