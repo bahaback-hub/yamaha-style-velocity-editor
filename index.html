@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Yamaha Style Velocity Editor</title>
+<meta name="description" content="Edit drum-note velocity inside Yamaha .STY style files, entirely in your browser." />
+<link rel="stylesheet" href="src/app.css" />
+</head>
+<body>
+<div class="app">
+  <header class="bar">
+    <h1>Style Velocity Editor</h1>
+    <p class="tag">Yamaha .STY &middot; runs entirely in this tab</p>
+  </header>
+
+  <!-- Step 1: load -->
+  <section class="panel" id="panelLoad">
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept=".sty,.STY" hidden />
+      <strong>Drop a .STY file here</strong>
+      <span>or click to browse</span>
+    </label>
+    <p class="note">Your file never leaves this device. There is no upload, no server and no network request.</p>
+  </section>
+
+  <!-- Step 2: choose -->
+  <section class="panel hidden" id="panelEdit">
+    <div class="row row-file">
+      <div>
+        <div class="filename" id="fileName">&mdash;</div>
+        <div class="meta" id="fileMeta"></div>
+      </div>
+      <button class="btn btn-ghost" id="btnReset">Change file</button>
+    </div>
+
+    <div class="grid">
+      <div class="field">
+        <label for="channelSel">MIDI channels</label>
+        <select id="channelSel" multiple size="6"></select>
+        <p class="hint">Drum parts are usually on channel 10. Leave everything selected to edit all parts.</p>
+      </div>
+
+      <div class="field">
+        <label for="noteLow">Lowest note</label>
+        <select id="noteLow"></select>
+        <label for="noteHigh">Highest note</label>
+        <select id="noteHigh"></select>
+        <p class="hint" id="rangeHint">&nbsp;</p>
+      </div>
+
+      <div class="field">
+        <label for="velocity">New velocity: <output id="velocityOut">100</output></label>
+        <input type="range" id="velocity" min="1" max="127" value="100" />
+        <div class="preset">
+          <button class="chip" data-v="127">127 loud</button>
+          <button class="chip" data-v="100">100 default</button>
+          <button class="chip" data-v="80">80 soft</button>
+          <button class="chip" data-v="40">40 ghost</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="btnDownload" disabled>Download edited .STY</button>
+      <button class="btn btn-ghost" id="btnDownloadOrig" disabled>Download original</button>
+    </div>
+
+    <div class="summary" id="summary"></div>
+  </section>
+
+  <p class="status" id="status" role="status" aria-live="polite"></p>
+</div>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

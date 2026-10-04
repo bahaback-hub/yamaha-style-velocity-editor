@@ -1,0 +1,5 @@
+node_modules/
+*.sty
+!test/**/*.sty
+dist/
+.DS_Store

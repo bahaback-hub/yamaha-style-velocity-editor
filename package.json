@@ -1,0 +1,24 @@
+{
+  "name": "yamaha-style-velocity-editor",
+  "version": "1.0.0",
+  "description": "Browser-based tool to edit drum-note velocity inside Yamaha .STY style files. Pure client-side, no server.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "serve": "npx --yes serve -l 5173 ."
+  },
+  "keywords": [
+    "yamaha",
+    "sty",
+    "sff",
+    "velocity",
+    "midi",
+    "genos",
+    "psr-a5000",
+    "drum"
+  ],
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

@@ -1,0 +1,230 @@
+/* Dark studio palette: low-glare surfaces, one warm accent for actions, and
+   colour reserved for state so a warning never looks like a button. */
+
+:root {
+  --bg: #0d1014;
+  --surface: #161b22;
+  --surface-2: #1c232c;
+  --line: #2a323d;
+  --text: #e6edf3;
+  --muted: #93a1b0;
+  --accent: #e8a33d;
+  --accent-ink: #1a1206;
+  --ok: #4ec9a0;
+  --warn: #e8735a;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+.bar { margin-bottom: 28px; }
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+
+.tag {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+}
+
+.panel + .panel { margin-top: 18px; }
+
+.hidden { display: none !important; }
+
+.note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Drop zone */
+
+.drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 46px 20px;
+  border: 2px dashed var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.drop:hover,
+.drop:focus-within {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.drop strong { font-size: 17px; }
+.drop span { color: var(--muted); font-size: 13px; }
+
+/* File header */
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.row-file {
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.filename {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 3px;
+}
+
+/* Fields */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 22px;
+}
+
+.field label {
+  display: block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+
+.field label + label { margin-top: 14px; }
+
+select,
+input[type='range'] {
+  width: 100%;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font: inherit;
+}
+
+select[multiple] { padding: 6px; }
+
+input[type='range'] { padding: 0; accent-color: var(--accent); }
+
+.hint {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+output {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.preset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.chip {
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover { color: var(--text); border-color: var(--accent); }
+
+/* Buttons */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 11px;
+  margin-top: 24px;
+}
+
+.btn {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 11px 19px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn:not(:disabled):hover { filter: brightness(1.08); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+}
+
+.btn-ghost:not(:disabled):hover { color: var(--text); border-color: var(--muted); }
+
+/* Summary + status */
+
+.summary {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.summary b { color: var(--text); }
+
+.status {
+  margin: 16px 0 0;
+  min-height: 22px;
+  font-size: 14px;
+}
+
+.status.ok { color: var(--ok); }
+.status.warn { color: var(--warn); }
