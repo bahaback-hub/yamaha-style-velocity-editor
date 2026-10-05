@@ -197,6 +197,161 @@ test('a hanging note given a length of zero is left hanging', () => {
   assert.deepEqual([...new Uint8Array(out)], [...new Uint8Array(buffer)], 'nothing to do');
 });
 
+// ---- adding and removing -----------------------------------------------------
+// A player builds a part by adding to it and taking from it, not only by retuning
+// what is already there. Both change the file's length, so both have to keep the
+// rest of it intact.
+
+test('a removed note takes both halves of its pair out of the file', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  assert.equal(parsed.notes.length, 2);
+
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { note: parsed.notes[0], remove: true },
+  ]);
+
+  const after = load(out);
+  assert.equal(after.notes.length, 1, 'one note is left');
+  // The survivor must be the second note, with its own values intact - taking the
+  // wrong release would silence the wrong key.
+  assert.equal(after.notes[0].note, 62, 'the note that was kept is the right one');
+  assert.equal(after.notes[0].velocity, 90, 'and it kept its velocity');
+  assert.equal(after.notes[0].durationTicks, 96, 'and its length');
+});
+
+test('removing every note leaves a track that still parses', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { note: parsed.notes[0], remove: true },
+    { note: parsed.notes[1], remove: true },
+  ]);
+  const after = load(out);
+  assert.equal(after.notes.length, 0, 'nothing is left to sound');
+  assert.ok(!after.error, `and it is still a readable track: ${after.error}`);
+});
+
+test('removing a hanging note drops only its note-on', () => {
+  const buffer = toBuf(concat([mthd(), track([0x00, 0x91, 60, 100])]));
+  const parsed = load(buffer);
+  assert.equal(parsed.notes[0].closeEventIndex, -1, 'it has no release to remove');
+
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { note: parsed.notes[0], remove: true },
+  ]);
+  assert.equal(load(out).notes.length, 0);
+});
+
+test('an added note arrives with its pitch, velocity and length', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { add: { track: 0, at: 480, pitch: 64, velocity: 88, durationTicks: 240 } },
+  ]);
+
+  const after = load(out);
+  assert.equal(after.notes.length, 3, 'the new note is there');
+  const added = after.notes.find((n) => n.note === 64);
+  assert.ok(added, 'on the pitch it was asked for');
+  assert.equal(added.at, 480, 'at the tick it was asked for');
+  assert.equal(added.velocity, 88);
+  assert.equal(added.durationTicks, 240, 'and it stops when it should');
+  // The two originals are untouched, and still ordered before it.
+  assert.deepEqual(
+    after.notes.filter((n) => n.note !== 64).map((n) => [n.note, n.velocity, n.durationTicks]),
+    [[60, 100, 96], [62, 90, 96]],
+    'the notes already in the file are unchanged',
+  );
+});
+
+test('an added note is not left hanging, even at zero length', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  // A note-on with no release is a hanging note: it keeps sounding, and the parser
+  // pairs a later release with the oldest open note on that key.
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { add: { track: 0, at: 480, pitch: 64, velocity: 90, durationTicks: 0 } },
+  ]);
+  const added = load(out).notes.find((n) => n.note === 64);
+  assert.ok(added, 'the note exists');
+  assert.equal(added.durationTicks, 0, 'and has no length');
+  assert.notEqual(added.closeEventIndex, -1, 'but still got a release to stop it');
+});
+
+test('an added note lands at the right tick when other events share it', () => {
+  // The existing note-off is at tick 96; adding at 96 puts a new note-on beside
+  // it, and the two must not be reordered into each other.
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { add: { track: 0, at: 96, pitch: 67, velocity: 70, durationTicks: 48 } },
+  ]);
+  const added = load(out).notes.find((n) => n.note === 67);
+  assert.ok(added, 'the note was added');
+  assert.equal(added.at, 96);
+  assert.equal(added.durationTicks, 48);
+  assert.equal(load(out).notes.length, 3, 'and nothing was corrupted');
+});
+
+test('adding and removing in one pass keeps both sides consistent', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { note: parsed.notes[0], remove: true },
+    { add: { track: 0, at: 480, pitch: 65, velocity: 95, durationTicks: 120 } },
+  ]);
+  const after = load(out);
+  assert.equal(after.notes.length, 2, 'one out, one in');
+  assert.deepEqual(after.notes.map((n) => n.note).sort(), [62, 65]);
+});
+
+test('an added note is clamped rather than trusted', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { add: { track: 0, at: -50, pitch: 999, velocity: 5000, durationTicks: 240 } },
+  ]);
+  const after = load(out);
+  // Found by pitch, not by position: the clamp moves it to tick 0, where it sits
+  // beside a note that was already there, so it is not last in the list.
+  const added = after.notes.find((n) => n.note === 127);
+  assert.ok(added, `the note still exists: ${JSON.stringify(after.notes.map((n) => [n.at, n.note]))}`);
+  assert.equal(added.at, 0, 'a negative tick is pulled to zero');
+  assert.equal(added.velocity, 127, 'the velocity stops at the top of MIDI');
+  assert.equal(added.durationTicks, 240, 'and the length is still what was asked for');
+});
+
+test('a removed note is not reported as a collision', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  // Both notes are the same pitch here, so shrinking one into the other would
+  // otherwise be reported - but a note that is going away cannot collide.
+  const tight = toBuf(concat([mthd(), track([
+    0x00, 0x91, 60, 100, 0x60, 0x81, 60, 0,
+    0x00, 0x91, 60, 90, 0x60, 0x81, 60, 0,
+  ])]));
+  const parsedTight = load(tight);
+  const clashes = findCollisions(parsedTight, [
+    { note: parsedTight.notes[0], remove: true },
+    { note: parsedTight.notes[1], durationTicks: 500 },
+  ]);
+  assert.equal(clashes.length, 0, `no clash from a note that is leaving: ${JSON.stringify(clashes)}`);
+  assert.ok(parsed, 'the two-notes buffer was still built');
+});
+
+test('an edit that both removes and retunes only removes', () => {
+  const buffer = twoNotes();
+  const parsed = load(buffer);
+  const out = applyEdits(buffer, { offset: 0, size: buffer.byteLength }, parsed, [
+    { note: parsed.notes[0], remove: true, velocity: 127, pitch: 70 },
+  ]);
+  const after = load(out);
+  assert.equal(after.notes.length, 1);
+  assert.equal(after.notes[0].note, 62, 'no note was transposed into existence');
+});
+
 test('no edits returns the same buffer rather than a copy', () => {
   const buffer = twoNotes();
   const parsed = load(buffer);

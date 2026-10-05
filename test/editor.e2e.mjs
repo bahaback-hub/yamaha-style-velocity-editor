@@ -549,6 +549,152 @@ const noopMsg = await page.locator('#status').textContent();
 check('a download with nothing pending does not claim to have changed anything',
   /No changes to write|copy of the original/.test(noopMsg), noopMsg.slice(0, 80));
 
+// ---- adding and removing notes ------------------------------------------------
+// A part is built by adding to it and taking from it, not only by retuning what is
+// already there. Both change the file's length, so both have to leave the rest of
+// it intact.
+
+/**
+ * Start again from the file as it was.
+ *
+ * Only clicks when there is something to discard. Downloading already clears the
+ * staged edits, so the button is disabled by then, and a blind click just waits for
+ * a control that will never become clickable.
+ */
+async function reset() {
+  if (await page.locator('#btnRevert').isEnabled()) {
+    await page.click('#btnRevert');
+    await page.waitForTimeout(150);
+  }
+}
+
+await reset();
+await page.selectOption('#partSelect', await partValue('MainDrum'));
+await page.waitForTimeout(150);
+
+const countNotes = () => page.evaluate(() => window.__editor.visibleNotes());
+const beforeAdd = await countNotes();
+
+// Double-click an empty row to put a note there. The roll knows the only mapping
+// from a tick and pitch to a pixel, so the spot comes from it rather than from
+// arithmetic here.
+const spot = await page.evaluate(() => window.__editor.addPoint());
+const addBox = await boxOf('#roll');
+await page.mouse.dblclick(addBox.x + spot.x, addBox.y + spot.y);
+await page.waitForTimeout(250);
+check('double-clicking an empty row adds a note', await countNotes() === beforeAdd + 1,
+  `${beforeAdd} -> ${await countNotes()}`);
+check('the addition is counted as a pending edit', (await page.evaluate(() => window.__editor.pending())) > 0,
+  `${await page.evaluate(() => window.__editor.pending())} pending`);
+
+const [dlAdd] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const addedPath = join(OUT, 'added.sty');
+await dlAdd.saveAs(addedPath);
+const addedBytes = readFileSync(addedPath);
+const addedParsed = readBack(addedPath).parsed;
+check('the file grew by a note, not by a guess', addedParsed.notes.length === 7,
+  `${addedParsed.notes.length} notes`);
+check('and it grew in bytes too, because a note is two events',
+  addedBytes.length > originalBytes.length, `${originalBytes.length} -> ${addedBytes.length}`);
+check('the notes already in the file are untouched',
+  JSON.stringify(addedParsed.notes.filter((n) => n.channel === 9 && n.note !== spot.pitch)
+    .map((n) => [n.at, n.note, n.velocity]))
+  === JSON.stringify(readBack(styPath).parsed.notes.filter((n) => n.channel === 9)
+    .map((n) => [n.at, n.note, n.velocity])));
+const addedNote = addedParsed.notes.find((n) => n.note === spot.pitch);
+check('the new note has the pitch and velocity it was given',
+  addedNote && addedNote.velocity === 100, JSON.stringify(addedNote && [addedNote.velocity, addedNote.at]));
+check('and a length, so it is not left sounding forever',
+  addedNote && addedNote.durationTicks > 0, `${addedNote?.durationTicks} ticks`);
+
+// Alt-click takes a note out. It stays on screen, faded, so the removal is visible
+// and reversible.
+await reset();
+await page.waitForTimeout(150);
+const target = await page.evaluate(() => window.__editor.first());
+const targetBox = await boxOf('#roll');
+await page.keyboard.down('Alt');
+await page.mouse.click(
+  targetBox.x + target.x + target.width / 2,
+  targetBox.y + target.y + target.height / 2,
+);
+await page.keyboard.up('Alt');
+await page.waitForTimeout(200);
+check('alt-clicking a note stages its removal',
+  await page.evaluate(() => window.__editor.removed().length) === 1,
+  `${await page.evaluate(() => window.__editor.removed().length)} removed`);
+check('and the removed note is still drawn', await countNotes() === beforeAdd,
+  `${await countNotes()} notes shown`);
+
+const [dlRm] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const removedPath = join(OUT, 'removed.sty');
+await dlRm.saveAs(removedPath);
+const removedParsed = readBack(removedPath).parsed;
+// Counted across the whole file, not just the part on screen: the fixture has a
+// second part, and a removal must not touch it.
+const totalBefore = readBack(styPath).parsed.notes.length;
+check('the file has one note fewer', removedParsed.notes.length === totalBefore - 1,
+  `${removedParsed.notes.length} notes, expected ${totalBefore - 1}`);
+check('and it shrank', readFileSync(removedPath).length < originalBytes.length,
+  `${originalBytes.length} -> ${readFileSync(removedPath).length}`);
+check('the other notes kept their values',
+  JSON.stringify(removedParsed.notes.map((n) => [n.at, n.note, n.velocity]))
+  === JSON.stringify(readBack(styPath).parsed.notes
+    .filter((n) => !(n.at === target.at && n.note === target.pitch && n.velocity === target.fileVelocity))
+    .map((n) => [n.at, n.note, n.velocity])));
+
+// Alt-click again puts it back, which is what a player will do the moment they
+// realise they removed the wrong note. A download does not clear the staged
+// removal - it only writes it - so the note is still marked, and this is the
+// second click on a note that is already on its way out.
+const still = await page.evaluate(() => window.__editor.removed());
+check('the staged removal survives the download',
+  still.length === 1 && still[0].at === target.at, JSON.stringify(still));
+
+// Measured again: the download button sits above the canvases, and clicking it
+// scrolls the page, so the box captured before that click is stale.
+const restored = await page.evaluate(() => window.__editor.first());
+const backBox = await boxOf('#roll');
+await page.keyboard.down('Alt');
+await page.mouse.click(
+  backBox.x + restored.x + restored.width / 2,
+  backBox.y + restored.y + restored.height / 2,
+);
+await page.keyboard.up('Alt');
+await page.waitForTimeout(200);
+check('alt-clicking it again brings it back',
+  await page.evaluate(() => window.__editor.removed().length) === 0,
+  `${await page.evaluate(() => window.__editor.removed().length)} removed`);
+
+await reset();
+const [dlBack2] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const backPath = join(OUT, 'restored.sty');
+await dlBack2.saveAs(backPath);
+check('and clearing that returns the file byte for byte',
+  Buffer.compare(readFileSync(backPath), originalBytes) === 0,
+  `${readFileSync(backPath).length} vs ${originalBytes.length}`);
+
+// Revert has to clear additions and removals too, or the button leaves a file
+// changed while claiming everything is back to the start. The spot is asked for
+// again because the previous download reset the view.
+const again = await page.evaluate(() => window.__editor.addPoint());
+const againBox = await boxOf('#roll');
+await page.mouse.dblclick(againBox.x + again.x, againBox.y + again.y);
+await page.waitForTimeout(250);
+check('the addition is back', await page.evaluate(() => window.__editor.pending()) > 0,
+  `${await page.evaluate(() => window.__editor.pending())} pending`);
+check('and the roll shows it', await countNotes() === beforeAdd + 1,
+  `${await countNotes()} notes`);
+await reset();
+await page.waitForTimeout(200);
+check('revert clears the addition', await page.evaluate(() => window.__editor.pending()) === 0,
+  `${await page.evaluate(() => window.__editor.pending())} pending`);
+check('and the roll shows the file as it was', await countNotes() === beforeAdd,
+  `${await countNotes()} notes`);
+check('and revert is disabled again', !(await page.locator('#btnRevert').isEnabled()));
+
+check('no JS errors after adding and removing', errors.length === 0, errors.slice(0, 3).join(' | '));
+
 // ---- what plays when ---------------------------------------------------------
 // The boundaries come from the file's markers, so the two halves are told apart by
 // what the file says rather than by guessing from where the parts change.

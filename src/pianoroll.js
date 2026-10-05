@@ -214,7 +214,15 @@ export class PianoRoll {
    * @param {any[]} notes only the notes of the part being shown
    * @param {{name: string, family: string, color: string}|null} part
    */
-  setNotes(notes, part, timing) {
+  /**
+   * Give the view a new set of notes.
+   *
+   * `fit` is a parameter rather than always on because this is also called after a
+   * note is added or removed. Refitting then would move everything under the
+   * pointer between one click and the next, so a second click - putting a note back,
+   * say - would land somewhere else entirely. A part on screen keeps its zoom.
+   */
+  setNotes(notes, part, timing, { fit = true } = {}) {
     this.notes = notes;
     this.part = part;
     this.division = timing.division || 480;
@@ -222,7 +230,7 @@ export class PianoRoll {
     this.lengthTicks = timing.lengthTicks || 0;
     this.selected = null;
     this.hover = null;
-    this.fit();
+    if (fit) this.fit();
   }
 
   setOverrides(map) {
@@ -231,6 +239,23 @@ export class PianoRoll {
 
   setShapeOverrides(map) {
     this.shapeOverrides = map ?? new Map();
+  }
+
+  /**
+   * Notes that are on their way out, and notes that are on their way in.
+   *
+   * A removed note is still drawn, faded, so the player can see what they are about
+   * to lose and click it again to keep it. An added note is drawn like any other,
+   * because once it is staged it is a note like any other - the only difference is
+   * that it will be written to the file.
+   */
+  setPending({ removed, added } = {}) {
+    this.removedNotes = removed ?? new Set();
+    this.addedNotes = added ?? [];
+  }
+
+  isRemoved(note) {
+    return this.removedNotes?.has(note) ?? false;
   }
 
   /** The velocity to draw for a note, honouring any pending edit. */
@@ -252,6 +277,29 @@ export class PianoRoll {
   #shape(note, change) {
     const current = this.shapeOverrides.get(note.velocityOffset) ?? {};
     this.shapeOverrides.set(note.velocityOffset, { ...current, ...change });
+  }
+
+  /**
+   * Draw a note, fading it if it has been marked for removal.
+   *
+   * The fade is the whole point: the player needs to see what is about to leave
+   * before saving, and needs to be able to aim at it again to change their mind.
+   */
+  #drawNote(n, x, y, w, h, colour) {
+    const c = this.ctx;
+    c.globalAlpha = this.isRemoved(n) ? 0.28 : 1;
+    c.fillStyle = colour;
+    c.fillRect(x, y, w, h);
+    // An outline so a faded note is still visible against a dark lane, and a
+    // dashed edge to say "this one is going".
+    if (this.isRemoved(n)) {
+      c.globalAlpha = 0.75;
+      c.strokeStyle = colour;
+      c.setLineDash([3, 2]);
+      c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+      c.setLineDash([]);
+    }
+    c.globalAlpha = 1;
   }
 
   /** Notes intersecting the visible window, in draw order. */
@@ -373,10 +421,17 @@ export class PianoRoll {
       const isSel = this.selected && this.selected.velocityOffset === n.velocityOffset;
       const isHover = this.hover && this.hover.velocityOffset === n.velocityOffset;
 
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.28 + 0.62 * v;
-      ctx.fillRect(x, y, nw, nh);
-      ctx.globalAlpha = 1;
+      // Velocity still reads as brightness for a note that is staying; a note on its
+      // way out is drawn flat and dashed instead, so "louder" and "going" cannot be
+      // confused for one another.
+      if (this.isRemoved(n)) {
+        this.#drawNote(n, x, y, nw, nh, color);
+      } else {
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.28 + 0.62 * v;
+        ctx.fillRect(x, y, nw, nh);
+        ctx.globalAlpha = 1;
+      }
 
       if (isSel || isHover) {
         ctx.strokeStyle = isSel ? '#ffffff' : this.theme.outline;
@@ -457,6 +512,16 @@ export class PianoRoll {
       // The resize edge wins over the body, otherwise a short note is unresizable
       // because its own note hitbox swallows the whole edge.
       const handle = this.lengthHandleAt(x, y);
+      // Alt-click is remove-or-restore. It is on a modifier rather than a plain
+      // click because losing a note by clicking near it is not a mistake anyone
+      // wants to make twice, and a note removed on a plain click could not be aimed
+      // at reliably - the note would vanish under the cursor.
+      if (e.altKey && note) {
+        this.selected = note;
+        this.handlers.onToggleRemove?.(note);
+        this.draw();
+        return;
+      }
       if (note && handle && handle.note === note) {
         this.selected = note;
         this.drag = { kind: 'length', note };
@@ -520,9 +585,18 @@ export class PianoRoll {
     c.addEventListener('pointercancel', end);
 
     c.addEventListener('dblclick', (e) => {
-      // Double click seeks, which is how every DAW behaves.
+      // Double click on empty space seeks, which is how every DAW behaves. Double
+      // click on a note adds one, because that is the other universal convention -
+      // and an empty row is exactly where a note is missing, so it is the natural
+      // place to want one.
       const { x, y } = this.#pos(e);
-      this.handlers.onSeek?.(this.xToTick(x));
+      const tick = this.xToTick(x);
+      if (this.noteAt(x, y)) {
+        this.handlers.onSeek?.(tick);
+        return;
+      }
+      // The gap is where a note is missing, so that is where one is wanted.
+      this.handlers.onAddNote?.({ at: tick, pitch: this.yToPitch(y) });
     });
   }
 

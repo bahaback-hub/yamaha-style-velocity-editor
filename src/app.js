@@ -191,7 +191,53 @@ function effective(note) {
   };
 }
 
-const pendingCount = () => (state ? state.pendingVelocity.size + state.pendingShape.size : 0);
+/** A tick as "bar 3", for saying where something happened. */
+function barLabel(tick) {
+  if (!state) return 'bar 1';
+  return `bar ${Math.floor(tick / state.tpb) + 1}`;
+}
+
+/**
+ * Stage a new note, or drop one.
+ *
+ * Added and removed notes are held apart from the two maps above because they are
+ * not edits *to* a note: the note a removal refers to does not exist after it, and
+ * an addition has no parsed note to hang a velocity or shape on. Keeping them in
+ * their own lists means revert, the pending count, and the "nothing to write"
+ * download all treat them the same way as everything else.
+ *
+ * `added` is a list rather than a map keyed by note, because a note the file does
+ * not have has no stable identity: two notes added at the same tick and pitch are
+ * two notes, and keying them by position would merge them.
+ */
+function stageAddition(add) {
+  state.added.push(add);
+  say(`Added ${noteName(add.pitch)} at ${barLabel(add.at)}.`, 'ok');
+}
+
+function stageRemoval(note) {
+  // Removing a note that is itself new is just undoing the addition.
+  const asNew = state.added.findIndex(
+    (a) => a.at === note.at && a.pitch === note.note && a.channel === note.channel,
+  );
+  if (asNew >= 0) { state.added.splice(asNew, 1); return; }
+  if (state.removed.has(note)) return;
+  state.removed.add(note);
+  state.pendingVelocity.delete(noteKey(note));
+  state.pendingShape.delete(noteKey(note));
+  say(`Removed ${noteName(note.note)} at ${barLabel(note.at)}.`, 'ok');
+}
+
+/** Undo a removal, so a note brought back is the one that was there. */
+function unstageRemoval(note) {
+  if (!state.removed.delete(note)) return;
+  say(`Restored ${noteName(note.note)} at ${barLabel(note.at)}.`, 'ok');
+}
+
+const isRemoved = (note) => state?.removed.has(note) ?? false;
+const pendingCount = () => (state
+  ? state.pendingVelocity.size + state.pendingShape.size + state.added.length + state.removed.size
+  : 0);
 
 /** The notes an operation should touch: the shown part, inside the pitch range. */
 function editableNotes() {
@@ -319,6 +365,10 @@ async function loadFile(file) {
       activeChannel: rows.length ? rows[0].channel : -1,
       pendingVelocity: new Map(),
       pendingShape: new Map(),
+      // Notes being taken out and put in. Separate from the maps above because
+      // they are not edits to a note that exists - see stageAddition.
+      removed: new Set(),
+      added: [],
       // Which variation the note tools are aimed at, and how wide "here" is.
       variationIndex: 0,
       liftScope: 'all',
@@ -380,6 +430,25 @@ function mountCanvases() {
     // download button would keep describing the state before the drag.
     onEdit: (note, patch) => { stageEdit(note, patch); afterEdit(); },
     onCommit: afterEdit,
+    onSeek: (tick) => seekTo(tick),
+    onToggleRemove: (note) => {
+      if (isRemoved(note)) unstageRemoval(note);
+      else stageRemoval(note);
+      afterEdit();
+    },
+    onAddNote: ({ at, pitch }) => {
+      stageAddition({
+        at,
+        pitch,
+        channel: state.activeChannel,
+        payloadIndex: state.notes.find((n) => n.channel === state.activeChannel)?.payloadIndex ?? 0,
+        // A sixteenth of a bar is long enough to see and short enough not to
+        // overlap the next beat; the player can drag the edge like any other note.
+        durationTicks: Math.max(1, Math.round(state.tpb / 16)),
+        velocity: 100,
+      });
+      afterEdit();
+    },
   });
   lane = new VelocityLane(el.velane, {
     onEdit: (note, patch) => { stageEdit(note, patch); afterEdit(); },
@@ -395,7 +464,20 @@ function mountCanvases() {
   draw();
 }
 
+/**
+ * Repaint and recount after a gesture.
+ *
+ * The views are re-fed the note list, not just repainted, because adding or removing
+ * a note changes which notes there are. Rebuilding the list on every pointer move
+ * would refit the roll mid-drag, so `fit` stays off here and the view keeps its
+ * zoom - the player is in the middle of something.
+ */
 function afterEdit() {
+  // Adding or removing changes which notes there are, so the views are re-fed -
+  // but without refitting, or the notes would move under the pointer mid-gesture.
+  if (state && (state.added.length || state.removed.size)) {
+    setActivePart(state.activeChannel, { preserveView: true });
+  }
   draw();
   refresh();
 }
@@ -556,25 +638,50 @@ function renderPartSelect() {
   el.partSelect.value = String(state.activeChannel);
 }
 
-function setActivePart(channel, { fit = false } = {}) {
+function setActivePart(channel, { fit = false, preserveView = false } = {}) {
   if (!state) return;
   state.activeChannel = Number(channel);
   el.partSelect.value = String(state.activeChannel);
   const row = state.rows.find((r) => r.channel === state.activeChannel) ?? null;
+  // Notes that have been marked for removal are still shown - faded - so the player
+  // can see what is leaving and change their mind. Excluding them would make a
+  // removal invisible the moment it was made.
   const notes = state.notes.filter((n) => n.channel === state.activeChannel);
+  // A staged addition has no parsed note behind it, so it is given the shape of one
+  // for drawing: a negative velocityOffset cannot collide with a real note's, and
+  // the roll keys its override maps by that, so a new note is drawn with its own
+  // values rather than inheriting another note's pending edits.
+  const shown = notes.concat(state.added
+    .filter((a) => a.channel === state.activeChannel)
+    .map((a, i) => ({
+      at: a.at,
+      note: a.pitch,
+      velocity: a.velocity,
+      durationTicks: a.durationTicks,
+      channel: a.channel,
+      velocityOffset: -(i + 1),
+      added: true,
+    })));
+  roll?.setPending({ removed: state.removed, added: state.added });
   const timing = { division: state.division, ticksPerBar: state.tpb, lengthTicks: state.lengthTicks };
   const view = { name: row?.label ?? 'Part', family: row?.family ?? 'other', color: row?.hex ?? '#e8a33d' };
 
-  roll?.setNotes(notes, view, timing);
-  lane?.setNotes(notes, view, timing, roll);
+  // Normally a change of part refits, so the new part fills the screen. After adding
+  // or removing a note it must not: that would move the notes out from under the
+  // pointer that just did it, and the second click would land somewhere else.
+  roll?.setNotes(shown, view, timing, { fit: !preserveView });
+  lane?.setNotes(shown, view, timing, roll);
   roll.snap = lane.snap = Number(el.snap.value) || 0;
   if (fit) roll?.fit();
   lane?.syncView(roll);
 
-  el.rollEmpty.classList.toggle('hidden', notes.length > 0);
+  el.rollEmpty.classList.toggle('hidden', shown.length > 0);
   const pendingHere = notes.filter((n) => pendingVelocityOf(n) !== null || pendingShapeOf(n) !== null).length;
-  el.editorHint.textContent = notes.length
-    ? `${notes.length} notes \u00b7 ${pendingHere ? `${pendingHere} edited` : 'no edits yet'}`
+  const addedHere = shown.length - notes.length;
+  el.editorHint.textContent = shown.length
+    ? `${shown.length} notes`
+      + (addedHere ? ` (${addedHere} new)` : '')
+      + ` \u00b7 ${pendingHere ? `${pendingHere} edited` : 'no edits yet'}`
     : 'no notes';
   draw();
   refresh();
@@ -887,6 +994,8 @@ function refresh() {
     ? 'No pending edits'
     : [
       mapChanges ? `${mapChanges} map` : null,
+      state.added.length ? `${state.added.length} added` : null,
+      state.removed.size ? `${state.removed.size} removed` : null,
       state.pendingVelocity.size ? `${state.pendingVelocity.size} velocity` : null,
       state.pendingShape.size ? `${state.pendingShape.size} pitch/length` : null,
     ].filter(Boolean).join(' \u00b7 ');
@@ -987,12 +1096,23 @@ function mulberry32(seed) {
 function buildEdited() {
   let buffer = state.buffer;
 
-  if (state.pendingShape.size > 0) {
+  // Adding and removing both re-emit a track, so they go in the same pass as the
+  // length edits - a track is written once with every change to it, not once per
+  // kind of change.
+  const structural = state.pendingShape.size > 0
+    || state.removed.size > 0
+    || state.added.length > 0;
+
+  if (structural) {
     // Later payloads first: rewriting one changes the length of everything after
     // it, so going backwards keeps the offsets from the original parse valid.
-    const indices = [...new Set(state.notes
-      .filter((n) => state.pendingShape.has(noteKey(n)))
-      .map((n) => n.payloadIndex))].sort((a, b) => b - a);
+    const touched = state.notes.filter((n) => state.pendingShape.has(noteKey(n)) || isRemoved(n));
+    const indices = [...new Set([
+      ...touched.map((n) => n.payloadIndex),
+      // An addition names the track to write to, which is not in the merged note
+      // list at all, so its payload has to be asked for separately.
+      ...state.added.map((a) => a.payloadIndex),
+    ])].sort((a, b) => b - a);
 
     for (const payloadIndex of indices) {
       const entry = state.parsedByPayload[payloadIndex];
@@ -1001,6 +1121,29 @@ function buildEdited() {
         (n) => n.payloadIndex === payloadIndex && state.pendingShape.has(noteKey(n)),
       );
       const edits = notes.map((n) => ({ note: n, ...state.pendingShape.get(noteKey(n)) }));
+
+      for (const note of state.notes.filter((n) => n.payloadIndex === payloadIndex && isRemoved(n))) {
+        edits.push({ note, remove: true });
+      }
+
+      // Each addition goes to the track of the part it was made in - a note belongs
+      // to the channel it plays, and the channel's track is where the file keeps it.
+      for (const add of state.added.filter((a) => a.payloadIndex === payloadIndex)) {
+        const trackIndex = entry.parsed.trackList.findIndex(
+          (t) => t.events.some((ev) => ev.kind === 'note-on' && ev.bytes[0] === (0x90 | (add.channel & 0x0f))),
+        );
+        // A channel with no existing note-on has no track to add to, and putting
+        // the note on an unrelated track would play it on the wrong channel.
+        edits.push({
+          add: {
+            track: trackIndex >= 0 ? trackIndex : 0,
+            at: add.at,
+            pitch: add.pitch,
+            velocity: add.velocity,
+            durationTicks: add.durationTicks,
+          },
+        });
+      }
 
       const clashes = findCollisions(entry.parsed, edits);
       if (clashes.length) {
@@ -1296,6 +1439,8 @@ el.btnRevert.addEventListener('click', () => {
   if (!state) return;
   state.pendingVelocity.clear();
   state.pendingShape.clear();
+  state.removed.clear();
+  state.added.length = 0;
   state.casmOps.length = 0;
   state.casmError = null;
   state.bulkVelocity = null;
@@ -1494,6 +1639,32 @@ window.__editor = {
   /** Where the velocity lane draws a given value. */
   laneY: (velocity) => (lane ? lane.velocityToY(velocity) : 0),
   width: () => roll?.cssWidth ?? 0,
+  /** How many notes the roll is showing, additions included. */
+  visibleNotes: () => roll?.notes?.length ?? 0,
+  /** The notes marked for removal, as count-and-identity rather than as note objects. */
+  removed: () => (state ? [...state.removed].map((n) => ({ at: n.at, pitch: n.note, velocity: n.velocity })) : []),
+  /**
+   * An empty spot in the part to double-click, in canvas pixels.
+   *
+   * Picked from the roll's own geometry rather than hard-coded, because a row's
+   * height depends on the pitch range of the part and a fixed offset would land on
+   * the wrong row for one fixture and the right one for the next.
+   */
+  addPoint: () => {
+    if (!roll?.notes?.length || !state) return null;
+    // Below the lowest note in the part: nothing is drawn there, so a double-click
+    // lands on empty space rather than on an existing note. Only if there is room
+    // below - a part that already sits on the lowest pitch uses the row above.
+    const lowest = Math.min(...roll.notes.map((n) => roll.pitchOf(n)));
+    const pitch = lowest > 0 ? lowest - 1 : Math.min(127, Math.max(...roll.notes.map((n) => roll.pitchOf(n))) + 1);
+    const first = roll.notes[0];
+    return {
+      pitch,
+      // Past the note's right edge, so the click cannot land on its own body.
+      x: roll.tickToX(first.at + roll.durationOf(first)) + 8,
+      y: roll.pitchToY(pitch) + roll.pxPerSemitone / 2,
+    };
+  },
 };
 
 // The pitch range the bulk operations work over. Without this the two selects are

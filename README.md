@@ -67,6 +67,10 @@ Below the map, one part at a time:
 - **Piano roll** — drag a note up or down to retune it, drag its right edge to
   change its length, drag empty space to pan, wheel to zoom, shift+wheel for
   height, double-click to seek.
+  - **Double-click an empty spot** to put a note there. It arrives with a velocity
+    of 100 and a sixteenth of a bar, and is retuned and resized like any other.
+  - **Alt-click a note** to take it out. It stays on screen, faded and dashed, so
+    you can see what is leaving and alt-click it again to keep it.
 - **Velocity lane** — one draggable bar per note, sharing the roll's time scale so
   a note and its bar always sit at the same x.
 - **Bulk transforms** on the part you have selected: set, scale, offset, humanise,
@@ -322,8 +326,9 @@ downloaded file back and ask the parser what actually changed:
   has to reach the file, a length edit has to resize the right track without
   losing the other, and a map toggle has to grow the file by exactly one 55-byte
   record while leaving every note byte alone. Toggling a dot back must restore the
-  original file byte for byte. Also reads the two marked variations back out of the
-  form, in the order the file plays them.
+  original file byte for byte. Also covers adding a note by double-clicking, taking
+  one out with alt-click, putting it back, and clearing both with revert. Reads the
+  two marked variations back out of the form, in the order the file plays them.
 - `test/lift.e2e.mjs` — lifting one note's velocity: a fixture built so the same
   note repeats through two marked variations at two different volumes, so "every
   occurrence" and "this variation only" have different, checkable answers. Asserts
@@ -357,6 +362,11 @@ disabled while a shorter suite still reported a pass.
   and cannot go wrong structurally. Pitch has to be written twice and can create
   an overlap; length re-serialises the track. Both are covered by tests against the
   real file, but check the result before relying on it on hardware.
+- **Adding and removing notes rewrites the whole track.** A note is two events and
+  its delta-times are variable-length, so the track is re-emitted and every
+  enclosing chunk length is adjusted. Adding also has to pick a track for the
+  channel, so a part that exists in a variation the file does not list may put the
+  note somewhere unexpected — check the result. Neither has been on hardware.
 - **Bulk transforms flatten dynamics by design.** Setting every note in a
   selection to one value removes the original accent pattern within it. Narrow the
   part or pitch range if you only want one drum part. Humanise uses a seeded
