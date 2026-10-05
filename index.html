@@ -99,6 +99,33 @@
       <button class="btn btn-ghost" id="btnPlayOriginal">Audition original</button>
     </div>
 
+    <!-- Play one variation, on its own, as many times as you like -->
+    <div class="block block-transport-variation" id="blockVariationPlay">
+      <div class="block-head">
+        <h2>Play one variation</h2>
+        <span class="hint">The bars the file itself calls that variation</span>
+      </div>
+      <div class="vplay">
+        <label class="inline">
+          Variation
+          <select id="playVariation"></select>
+        </label>
+        <label class="check" title="Start it again when it ends">
+          <input type="checkbox" id="playLoop" /> Repeat
+        </label>
+        <label class="inline">
+          Count-in
+          <select id="playCountIn">
+            <option value="0" selected>None</option>
+            <option value="1">1 bar</option>
+            <option value="2">2 bars</option>
+          </select>
+        </label>
+        <button class="btn" id="btnPlayVariation">Play variation</button>
+        <span class="hint" id="playVariationHint"></span>
+      </div>
+    </div>
+
     <!-- Editor -->
     <div class="block block-editor" id="blockEditor">
       <div class="block-head">

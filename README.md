@@ -52,6 +52,10 @@ top of every variation, so the boundaries are read, not guessed:
 - **Lift one note** then changes the velocity of every occurrence of a single note,
   either across the whole style or in the one variation you select. The count of
   occurrences it will touch is written out before you press the button.
+- **Play one variation** plays just that variation, on its own, with **Repeat** to
+  start it again when it ends and a **count-in** of one or two bars before it. It
+  opens on Main A, and says so when a variation holds none of the parts you have
+  switched on, rather than playing silence without explanation.
 
 This was wrong earlier. The tool used to claim that note-to-variation attribution was
 impossible because styles "flatten the performance into one timeline" — but the
@@ -311,7 +315,9 @@ and the synthetic cases carry the weight alone.
 
 `test/audio.test.js` drives the player against a stubbed `AudioContext`, which is
 the only way to assert the scheduling maths — velocity-to-gain curve, voice cap,
-envelopes — without a sound card.
+envelopes — without a sound card. The stub's clock is writable, so time can be moved
+by hand and the region, repeat and count-in behaviour checked exactly rather than by
+waiting on a real one.
 
 The browser checks drive the real page with a real pointer, then read the
 downloaded file back and ask the parser what actually changed:
@@ -367,6 +373,11 @@ disabled while a shorter suite still reported a pass.
   enclosing chunk length is adjusted. Adding also has to pick a track for the
   channel, so a part that exists in a variation the file does not list may put the
   note somewhere unexpected — check the result. Neither has been on hardware.
+- **Repeat stops after 50 passes.** A loop that never ends is a bug that sounds like
+  a feature, and nobody should come back to a tab still playing. Raise `MAX_LOOPS`
+  in `src/audio.js` if you want it to run for ever.
+- **The count-in clicks are not part of the style.** They are only in the preview,
+  so counting in never changes the file you download.
 - **Bulk transforms flatten dynamics by design.** Setting every note in a
   selection to one value removes the original accent pattern within it. Narrow the
   part or pitch range if you only want one drum part. Humanise uses a seeded

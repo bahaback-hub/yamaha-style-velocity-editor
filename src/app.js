@@ -57,6 +57,9 @@ const el = {
   map: $('map'), mapHint: $('mapHint'), mapSummary: $('mapSummary'),
   blockMap: $('blockMap'), btnCopyMap: $('btnCopyMap'), saveHint: $('saveHint'),
   vars: $('vars'), variationsHint: $('variationsHint'), variationsSummary: $('variationsSummary'),
+  blockVariationPlay: $('blockVariationPlay'), playVariation: $('playVariation'),
+  playLoop: $('playLoop'), playCountIn: $('playCountIn'),
+  btnPlayVariation: $('btnPlayVariation'), playVariationHint: $('playVariationHint'),
   blockVariations: $('blockVariations'), lift: $('lift'),
 
   partSelect: $('partSelect'), snap: $('snap'), followPlay: $('followPlay'),
@@ -545,6 +548,74 @@ function renderVariations() {
   el.variationsSummary.innerHTML = bits.length
     ? `<b>Worth knowing:</b> ${esc(bits.join('. '))}.`
     : 'Every variation matches what the map declares.';
+  renderPlayVariation();
+}
+
+/**
+ * The list a variation can be played from, kept in step with the form above.
+ *
+ * Two entries per name where a name occurs twice - a style can play Main B in two
+ * places - because they are two different stretches of music and playing one is not
+ * playing the other. The number is which time it appears, so the list stays readable.
+ */
+function renderPlayVariation() {
+  const variations = state?.variations ?? [];
+  const previous = el.playVariation.value;
+  el.playVariation.textContent = '';
+  const seen = new Map();
+  variations.forEach((v, index) => {
+    const n = (seen.get(v.name) ?? 0) + 1;
+    seen.set(v.name, n);
+    const o = document.createElement('option');
+    o.value = String(index);
+    o.textContent = `${v.name}${v.bars ? ` \u00b7 ${v.bars} bar${v.bars === 1 ? '' : 's'}` : ''}`;
+    el.playVariation.append(o);
+  });
+
+  // Default to Main A, because that is where a player starts and it is what the
+  // style leads with. Falls back to the first entry when there is no Main A.
+  const mainA = variations.findIndex((v) => /^main a$/i.test(v.name.trim()));
+  el.playVariation.value = variations.some((v) => String(v.index) === previous) ? previous
+    : String(mainA >= 0 ? mainA : 0);
+  el.blockVariationPlay.classList.toggle('hidden', variations.length === 0);
+  describePlayVariation();
+}
+
+/**
+ * Hand the engine the region, the loop and the count-in for whatever is selected.
+ *
+ * Applied whenever the selection changes rather than only when Play is pressed, so
+ * the settings describe what is *about* to play. Otherwise the engine holds the
+ * last played configuration, and a player who changes the count-in and reads the
+ * status line is told about the previous one.
+ */
+function applyPlaySettings() {
+  if (!player) return;
+  const v = (state?.variations ?? [])[Number(el.playVariation.value)];
+  player.setRegion(v ? { startTick: v.startTick, endTick: v.endTick } : null,
+    v ? el.playLoop.checked : false);
+  player.setCountIn(v ? Number(el.playCountIn.value) : 0, state.tpb);
+}
+
+/** What the button is about to play, in bars and seconds. */
+function describePlayVariation() {
+  applyPlaySettings();
+  const variations = state?.variations ?? [];
+  const v = variations[Number(el.playVariation.value)];
+  if (!v) { el.playVariationHint.textContent = ''; return; }
+  const bars = v.bars ?? Math.max(1, Math.round((v.endTick - v.startTick) / state.tpb));
+  const secs = tickToSeconds(state.tempoMap, v.endTick, state.division)
+    - tickToSeconds(state.tempoMap, v.startTick, state.division);
+  const length = `${bars} bar${bars === 1 ? '' : 's'}, ${secs.toFixed(1)}s`;
+
+  // A variation that holds none of the parts currently switched on would play
+  // silence, which looks like a broken button. Say so, and say why.
+  const sounding = state.notes.filter(
+    (n) => state.selected.has(n.channel) && n.at >= v.startTick && n.at < v.endTick,
+  ).length;
+  el.playVariationHint.textContent = sounding
+    ? length
+    : `${length} \u00b7 silent: none of the parts you have switched on play here`;
 }
 
 function mountVariations() {
@@ -693,7 +764,10 @@ function seekTo(tick) {
   roll.scrollTick = Math.max(0, Math.min(state.lengthTicks, tick - roll.cssWidth * 0.1 / roll.pxPerTick));
   roll.clampScroll();
   draw();
-  if (player) player.start(Math.max(0, tickToSeconds(state.tempoMap, tick, state.division)));
+  // A tick, not seconds: the player was handed a tick->seconds function and works
+  // in seconds internally, so converting here meant seeking to the wrong place
+  // whenever the tempo was not 120.
+  if (player?.playing) player.start(Math.max(0, Math.round(tick)));
 }
 
 // ---- the section map ---------------------------------------------------------
@@ -1303,10 +1377,20 @@ async function ensureAudio() {
   return audioCtx;
 }
 
-async function play(usePreview, fromSeconds = 0) {
+/**
+ * @param {boolean} usePreview
+ * @param {number} fromTick
+ * @param {{startTick: number, endTick: number, loop: boolean, countIn: number}} [region]
+ */
+async function play(usePreview, fromTick = 0, region = null) {
   if (!state) return;
   const ctx = await ensureAudio();
-  if (!player) player = new Player(ctx);
+  if (!player) {
+    player = new Player(ctx);
+    // The engine only exists from the first playback onwards, so the settings the
+    // player chose before that have to reach it now.
+    applyPlaySettings();
+  }
 
   const familyOf = (n) => (state.rows.find((r) => r.channel === n.channel)?.family) ?? 'other';
   const useEdit = usePreview && el.previewEdit.checked;
@@ -1320,15 +1404,22 @@ async function play(usePreview, fromSeconds = 0) {
     (t) => tickToSeconds(state.tempoMap, t, state.division), familyOf, valueOf);
   player.setSpeed(Number(el.speed.value));
   player.master.gain.value = Number(el.volume.value) / 100;
+  // The whole-file transport plays everything and never counts in; playVariation
+  // passes a region and gets the opposite.
+  player.setRegion(region ? { startTick: region.startTick, endTick: region.endTick } : null,
+    region?.loop ?? false);
+  player.setCountIn(region?.countIn ?? 0, state.tpb);
   player.onEnded = () => {
     el.btnPlay.textContent = PLAY_LABEL;
+    el.btnPlayVariation.textContent = 'Play variation';
     cancelAnimationFrame(rafId);
     roll?.setPlayhead(null);
     lane?.setPlayhead(null);
     draw();
   };
-  player.start(fromSeconds);
+  player.start(fromTick);
   el.btnPlay.textContent = PAUSE_LABEL;
+  if (region) el.btnPlayVariation.textContent = 'Stop variation';
   tickPlayhead();
 }
 
@@ -1354,6 +1445,7 @@ function playheadTick() {
 function stopPlayback() {
   player?.stop();
   el.btnPlay.textContent = PLAY_LABEL;
+  el.btnPlayVariation.textContent = 'Play variation';
   cancelAnimationFrame(rafId);
   const ph = document.querySelector('.tl-playhead');
   ph?.remove();
@@ -1414,6 +1506,9 @@ el.voices.addEventListener('click', (e) => {
   else state.selected.add(ch);
   renderVoices();
   refresh();
+  // The chosen parts are what a variation will sound, so the note beside the play
+  // button has to follow them.
+  describePlayVariation();
   // One click toggles inclusion; double-click brings the part on screen, which is
   // the distinction worth keeping given the roll only ever shows one part.
 });
@@ -1490,6 +1585,44 @@ el.btnApplySet.addEventListener('click', () => {
 for (const button of document.querySelectorAll('[data-op]')) {
   button.addEventListener('click', () => runOperation(button.dataset.op));
 }
+
+/**
+ * Play one variation on its own, optionally repeating it.
+ *
+ * The region comes from the file's markers, so this plays the bars the style itself
+ * calls that variation. It shares the transport's sound and the same "preview edit"
+ * switch, because auditioning a change is the reason to play one variation rather
+ * than the whole file.
+ */
+async function playVariation() {
+  const variations = state?.variations ?? [];
+  const v = variations[Number(el.playVariation.value)];
+  if (!v) {
+    say('This file records no variation markers, so there is no single variation to play.', 'warn');
+    return;
+  }
+  // Always starts at the variation. The "preview edit" switch decides which values
+  // the notes are played with, not where the variation begins - starting at zero
+  // because an edit was staged would play the whole style instead.
+  await play(true, v.startTick, {
+    startTick: v.startTick,
+    endTick: v.endTick,
+    loop: el.playLoop.checked,
+    countIn: Number(el.playCountIn.value),
+  });
+  el.btnPlay.textContent = 'Playing variation';
+  say(`Playing ${v.name}${el.playLoop.checked ? ', repeating' : ''}`
+    + `${Number(el.playCountIn.value) ? ` with ${el.playCountIn.value} bar count-in` : ''}.`
+    + ' Press Stop to end it.', 'ok');
+}
+
+// Every control in that row has to reach the engine, not just the variation: the
+  // count-in and the repeat are chosen there too, and a Play that ignored them
+  // would be a button that quietly does something else.
+for (const control of [el.playVariation, el.playCountIn, el.playLoop]) {
+  control.addEventListener('change', describePlayVariation);
+}
+el.btnPlayVariation.addEventListener('click', playVariation);
 
 el.btnPlay.addEventListener('click', () => {
   if (player?.playing) {
@@ -1636,6 +1769,43 @@ window.__editor = {
       rowHeight: roll.pxPerSemitone,
     };
   },
+  /**
+ * What playing a variation would schedule, for the browser tests.
+ *
+ * The engine's own queue, not a recount from the note list: the whole question is
+ * whether the region filter and the count-in put the right things in front of the
+ * clock, and asking the engine is the only version of that answer that cannot
+ * disagree with what would sound.
+ */
+  scheduled: () => {
+    if (!player || !state) return { notes: [], clicks: [], region: null, countIn: 0, musicFrom: 0 };
+    const v = (state.variations ?? [])[Number(el.playVariation.value)] ?? null;
+    const region = v ? { startTick: v.startTick, endTick: v.endTick } : null;
+    const queue = region
+      ? player.queue.filter((q) => q.atTick >= region.startTick && q.atTick < region.endTick)
+      : player.queue;
+    return {
+      notes: queue.map((q) => ({ tick: q.atTick, pitch: q.note, velocity: q.velocity })),
+      clicks: player.countInClicksFor(region ? region.startTick : 0),
+      countIn: player.countIn,
+      musicFrom: player.toSeconds ? player.toSeconds(region ? region.startTick : 0) : 0,
+      region,
+    };
+  },
+  /** How many times the repeated variation has come round. */
+  loops: () => player?.loops ?? 0,
+  /** The engine's own view of what it is doing, for diagnosing a stuck repeat. */
+  playerState: () => (player ? {
+    playing: player.playing,
+    loop: player.loop,
+    loops: player.loops,
+    voices: player.voices,
+    cursor: player.cursor,
+    queueLength: player.queue.length,
+    activeLength: player.activeQueue?.length ?? null,
+    regionFrom: player.regionFrom ?? null,
+    regionTo: player.regionTo ?? null,
+  } : null),
   /** Where the velocity lane draws a given value. */
   laneY: (velocity) => (lane ? lane.velocityToY(velocity) : 0),
   width: () => roll?.cssWidth ?? 0,

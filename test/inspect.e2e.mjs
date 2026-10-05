@@ -220,6 +220,95 @@ check('an explicit caveat explains sections are not separable', /cannot be split
 // Pitch range
 check('lowest/highest pitch selects exist', await page.locator('#noteLow').count() === 1 && await page.locator('#noteHigh').count() === 1);
 
+// ---- playing one variation ---------------------------------------------------
+// The point of this is hearing one variation on its own, so the checks are about
+// which notes get scheduled and when - not about whether the button exists.
+
+// The engine is built the first time anything is played, and it is what knows
+// which notes a variation would schedule. So start playback once and stop it, and
+// the checks below ask that engine rather than a second guess at its rules.
+await page.click('#btnPlay');
+await page.waitForTimeout(400);
+await page.click('#btnStop');
+await page.waitForTimeout(200);
+
+const playSelect = page.locator('#playVariation');
+const playOptions = await playSelect.locator('option').allTextContents();
+check('the play list names the marked variations', playOptions.length === 2
+  && playOptions.some((o) => /Main A/.test(o)) && playOptions.some((o) => /Main B/.test(o)),
+  playOptions.join(' | '));
+check('it offers Main A to start with',
+  /Main A/.test(await playSelect.locator('option:checked').textContent()),
+  await playSelect.locator('option:checked').textContent());
+check('and says how long the chosen variation is',
+  /bar[s]?, [\d.]+s/.test(await page.locator('#playVariationHint').textContent()),
+  await page.locator('#playVariationHint').textContent());
+
+// What the engine would schedule, without needing to hear it.
+const scheduled = () => page.evaluate(() => window.__editor.scheduled());
+await page.selectOption('#playVariation', { index: 1 });
+const mainB = await scheduled();
+check('playing a variation plays only that variation\'s notes',
+  mainB.notes.length > 0
+  && mainB.notes.every((n) => n.tick >= mainB.region.startTick && n.tick < mainB.region.endTick),
+  `${mainB.notes.length} notes, region ${JSON.stringify(mainB.region)}`);
+check('and it really is a different stretch of music from Main A',
+  await page.selectOption('#playVariation', { index: 0 }).then(async () => {
+    const mainA = await scheduled();
+    return mainA.region.startTick !== mainB.region.startTick
+      || mainA.notes.some((n) => !mainB.notes.some((m) => m.tick === n.tick));
+  }),
+  'Main A and Main B differ');
+
+await page.selectOption('#playVariation', { index: 1 });
+await page.selectOption('#playCountIn', '1');
+const counted = await scheduled();
+check('a count-in adds clicks before the music, not into it',
+  counted.countIn > 0 && counted.clicks.every((c) => c.time < counted.musicFrom),
+  `${counted.clicks.length} clicks at ${counted.clicks.map((c) => c.time.toFixed(2)).join(', ')}s, music at ${counted.musicFrom?.toFixed(2)}s`);
+check('one bar of count-in is one bar of clicks',
+  counted.clicks.length === 4, `${counted.clicks.length} clicks`);
+
+await page.selectOption('#playCountIn', '0');
+check('with no count-in there are no clicks', (await scheduled()).clicks.length === 0);
+
+// Excluding every part leaves a variation silent, and it has to say so rather than
+// looking like a button that does nothing.
+for (const row of await page.locator('.voice').all()) await row.click();
+await page.selectOption('#playVariation', { index: 1 });
+check('a variation with nothing switched on says it is silent',
+  /silent/.test(await page.locator('#playVariationHint').textContent()),
+  await page.locator('#playVariationHint').textContent());
+for (const row of await page.locator('.voice').all()) await row.click();
+await page.waitForTimeout(200);
+check('and stops saying so once the parts are back',
+  !/silent/.test(await page.locator('#playVariationHint').textContent()),
+  await page.locator('#playVariationHint').textContent());
+
+// Actually playing it: the transport must run and stop must work.
+await page.click('#btnPlayVariation');
+await page.waitForTimeout(700);
+check('the variation plays', parseFloat(await page.locator('#clock').textContent()) > 0,
+  `${await page.locator('#clock').textContent()}`);
+check('the button offers to stop it',
+  (await page.locator('#btnPlayVariation').textContent()).trim() === 'Stop variation',
+  (await page.locator('#btnPlayVariation').textContent()).trim());
+await page.click('#btnStop');
+await page.waitForTimeout(200);
+check('stop returns it to Play',
+  (await page.locator('#btnPlayVariation').textContent()).trim() === 'Play variation');
+
+// Repeat is a real loop, so it must actually repeat. Main B is four bars, which at
+// 120 BPM is four seconds, so the wait has to outlast one pass or the repeat cannot
+// have happened yet.
+await page.check('#playLoop');
+await page.click('#btnPlayVariation');
+await page.waitForTimeout(5200);
+const loops = await page.evaluate(() => window.__editor.loops());
+await page.click('#btnStop');
+check('repeat runs the variation more than once', loops > 0, `${loops} repeats`);
+await page.uncheck('#playLoop');
+
 // ---- playback ---------------------------------------------------------------
 await page.click('#btnPlay');
 await page.waitForTimeout(800);

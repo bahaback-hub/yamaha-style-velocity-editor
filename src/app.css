@@ -85,6 +85,16 @@ h2 { margin: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06
 .clock { font-variant-numeric: tabular-nums; color: var(--text); font-size: 13px; min-width: 52px; text-align: right; }
 
 .btn-play { min-width: 52px; font-size: 16px; padding: 9px 14px; }
+
+/* Play-one-variation. Same row shape as the transport above, so it reads as part
+   of it rather than as a separate mode. */
+.block-transport-variation { margin-top: 12px; }
+.vplay {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 12px 16px; background: var(--surface-2);
+  border: 1px solid var(--line-soft); border-radius: var(--radius);
+}
+.vplay select { min-width: 150px; }
 select, input[type='range'] {
   background: var(--surface-3); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 13px;

@@ -16,6 +16,10 @@
 const LOOKAHEAD_MS = 25;
 const SCHEDULE_WINDOW_S = 0.2;
 const MAX_VOICES = 48;
+// A loop that never stops is a bug that sounds like a feature, and a player who
+// walks away from the tab would never find the end of it. Fifty passes is far more
+// than anyone is listening for, and the counter is reported in the status line.
+const MAX_LOOPS = 50;
 
 export const TIMBRES = {
   drums: { type: 'percussion', label: 'Drums' },
@@ -62,6 +66,44 @@ export class Player {
     this.voices = 0;
     /** Duration of the scheduled material in seconds, at speed 1. */
     this.duration = 0;
+    // Region playback: which part of the file is being played, and whether to
+    // start it again when it runs out. Null start means the whole file.
+    this.region = null;
+    this.loop = false;
+    /** Bars of click before the music starts. */
+    this.countIn = 0;
+    /** Signed count of how many times the region has been played through. */
+    this.loops = 0;
+  }
+
+  /**
+   * Play only part of the file, optionally repeating it.
+   *
+   * This is what makes a variation audible on its own. The boundaries come from
+   * the file's markers, so "play Main B" means the bars the style itself calls
+   * Main B - not a guess, and not whatever happens to be visible on screen.
+   *
+   * @param {{startTick?: number, endTick?: number}|null} region
+   * @param {boolean} [loop]
+   */
+  setRegion(region, loop = false) {
+    this.region = region ?? null;
+    this.loop = Boolean(loop);
+    this.loops = 0;
+  }
+
+  /**
+   * Bars of click to play before the music.
+   *
+   * Scheduled as notes rather than as a separate click track, so they go through
+   * the same voice pool and are cut off by stop() like everything else.
+   *
+   * @param {number} bars 0, 1 or 2
+   * @param {number} [ticksPerBar]
+   */
+  setCountIn(bars, ticksPerBar = 1920) {
+    this.countIn = Math.max(0, Math.min(2, Math.round(bars)));
+    this.countInTicksPerBar = ticksPerBar;
   }
 
   /**
@@ -77,6 +119,9 @@ export class Player {
    *   a retune or a new length as well.
    */
   load(notes, timing, toSeconds, familyOf, valuesOf) {
+    // Kept in ticks as well as seconds: the region is expressed in ticks, and a
+    // note straddling a boundary has to be judged in ticks to be included or not.
+    this.toSeconds = toSeconds;
     this.queue = notes
       .map((n) => {
         const raw = valuesOf ? valuesOf(n) : null;
@@ -89,6 +134,7 @@ export class Player {
         const pitch = over?.pitch ?? n.note;
         const ticks = over?.durationTicks ?? n.durationTicks;
         return {
+          atTick: n.at,
           time: toSeconds(n.at),
           note: pitch,
           // A note with no note-off gets a short fallback rather than being
@@ -107,23 +153,120 @@ export class Player {
     this.speed = Math.max(0.25, Math.min(2, multiplier));
   }
 
-  /** @param {number} [fromTick] */
+  /**
+   * @param {number} [fromTick]
+   */
   start(fromTick = 0) {
     this.stopSources();
-    // Nothing to play: report the end rather than arming a 25 ms timer that
-    // would then spin for the life of the page.
-    if (this.queue.length === 0) {
+    const region = this.region;
+
+    // Only what falls inside the region, and only what starts inside it. A note
+    // that begins before the region is left out rather than clipped: its release
+    // is somewhere earlier, so playing it would sound a drum hit out of nowhere.
+    const items = region
+      ? this.queue.filter((q) => q.atTick >= region.startTick
+        && (region.endTick == null || q.atTick < region.endTick))
+      : this.queue;
+
+    // The count-in lives on the queue as ordinary click notes placed before the
+    // music, so it is scheduled by the same lookahead, cut off by the same stop(),
+    // and slowed down by the same speed control. Nothing else has to know it is
+    // there. Position is in seconds, which is what the queue is sorted by, and
+    // `fromTick` is converted the same way - mixing the two units is how a count-in
+    // ends up an hour long.
+    const musicFrom = this.toSeconds ? this.toSeconds(fromTick) : 0;
+    const clicks = this.countIn > 0 && this.toSeconds ? this.#countInClicks(musicFrom) : [];
+    const withCountIn = clicks.length
+      ? [...clicks, ...items].sort((a, b) => a.time - b.time)
+      : items;
+    this.countInUntil = this.countIn > 0 ? musicFrom : 0;
+    this.musicFromSeconds = musicFrom;
+
+    if (withCountIn.length === 0) {
       this.playing = false;
       this.onEnded?.();
       return;
     }
     this.playing = true;
     this.startTick = fromTick;
-    const fromSeconds = this.timing ? this.tickSeconds(fromTick) : 0;
-    this.cursor = this.queue.findIndex((q) => q.time >= fromSeconds);
-    if (this.cursor < 0) this.cursor = this.queue.length;
-    this.startedAt = this.ctx.currentTime + 0.05;
+    this.regionFrom = region ? region.startTick : 0;
+    this.regionTo = region && region.endTick != null ? region.endTick : null;
+    this.activeQueue = withCountIn;
+    // The clock behind `startedAt` starts when playback does, but the queue is in
+    // seconds from the top of the file. The two are lined up by `origin`: the file
+    // second that corresponds to "now".
+    //
+    // With a count-in that is the first click, not the music. Anchoring on the
+    // music instead would put every click before "now" - and a click before now is
+    // dropped as late, so the count-in would be silent.
+    this.originSeconds = clicks.length ? clicks[0].time : musicFrom;
+    // Counting in starts at the first click; otherwise start where the caller asked.
+    this.cursor = this.countIn > 0
+      ? 0
+      : withCountIn.findIndex((q) => q.time >= musicFrom);
+    if (this.cursor < 0) this.cursor = withCountIn.length;
+    this.loops = 0;
+    this.startedAt = this.ctx.currentTime + 0.05 - this.originSeconds / this.speed;
     this.timer = setInterval(() => this.pump(), LOOKAHEAD_MS);
+    this.pump();
+  }
+
+  /**
+   * One click per beat for the count-in bars, the first beat accented.
+   *
+   * Placed from the music's own start backwards, so the click lands exactly on
+   * the beat it is counting rather than approximately.
+   */
+  #countInClicks(musicFrom) {
+    const usPerQuarter = this.timing?.tempoMap?.[0]?.usPerQuarter ?? 500000;
+    const beatsPerBar = this.timing?.timeSignature?.numerator ?? 4;
+    // A quarter note is a quarter note whatever the meter says the bar holds, so
+    // the beat length is the tempo alone - the denominator belongs to the bar, not
+    // to the beat. In 6/8 at 120 the click is still half a second.
+    const beatSeconds = usPerQuarter / 1e6;
+    const clicks = [];
+    for (let bar = this.countIn - 1; bar >= 0; bar--) {
+      for (let beat = 0; beat < beatsPerBar; beat++) {
+        clicks.push({
+          time: musicFrom - (bar * beatsPerBar + (beatsPerBar - beat)) * beatSeconds,
+          note: beat === 0 ? 76 : 77, // a high woodblock: accented vs plain
+          duration: beatSeconds * 0.5,
+          // 'drums' is a family name, not a timbre type: the family is what decides which
+          // instrument is used, and an unknown family silently falls back to the
+          // default synth - so a click written as "percussion" would come out as a
+          // plain tone rather than a click.
+          family: 'drums',
+          velocity: beat === 0 ? 110 : 80,
+          isCountIn: true,
+        });
+      }
+    }
+    return clicks.filter((c) => c.time >= 0);
+  }
+
+  /**
+   * Where the count-in clicks would fall, for the browser tests.
+   *
+   * Answers the same question the scheduler does, by calling the same code, so a
+   * test asking "would the clicks be before the music" cannot be satisfied by a
+   * second implementation that happens to agree with itself.
+   */
+  countInClicksFor(fromTick = 0) {
+    if (this.countIn <= 0 || !this.toSeconds) return [];
+    return this.#countInClicks(this.toSeconds(fromTick));
+  }
+
+  /** Start again at the beginning of the region, which is what looping means. */
+  restart() {
+    this.stopSources();
+    this.loops++;
+    // From the region, not from zero - and never the count-in again: counting in
+    // before every repeat would make the loop unusable.
+    const fromSeconds = this.toSeconds ? this.toSeconds(this.regionFrom ?? 0) : 0;
+    this.cursor = this.activeQueue.findIndex((q) => q.time >= fromSeconds && !q.isCountIn);
+    if (this.cursor < 0) this.cursor = this.activeQueue.length;
+    this.originSeconds = fromSeconds;
+    this.startedAt = this.ctx.currentTime + 0.05 - fromSeconds / this.speed;
     this.pump();
   }
 
@@ -136,16 +279,23 @@ export class Player {
     if (!this.playing) return;
     const now = this.ctx.currentTime;
     const horizon = now - this.startedAt + SCHEDULE_WINDOW_S * this.speed;
-    while (this.cursor < this.queue.length && this.queue[this.cursor].time <= horizon) {
-      const item = this.queue[this.cursor++];
+    while (this.cursor < this.activeQueue.length && this.activeQueue[this.cursor].time <= horizon) {
+      const item = this.activeQueue[this.cursor++];
       const when = this.startedAt + item.time / this.speed;
       if (when < now) continue; // already in the past
       this.fire(item, when);
     }
-    if (this.cursor >= this.queue.length && this.voices === 0) {
-      this.stop();
-      this.onEnded?.();
+    if (this.cursor < this.activeQueue.length || this.voices > 0) return;
+
+    // The region has run out. With loop on, start it again rather than stopping -
+    // but only once the last note has actually finished, otherwise the repeat
+    // truncates the tail.
+    if (this.loop && this.region && this.loops < MAX_LOOPS) {
+      this.restart();
+      return;
     }
+    this.stop();
+    this.onEnded?.();
   }
 
   /**
@@ -153,6 +303,8 @@ export class Player {
    * @param {number} when
    */
   fire(item, when) {
+    // The cap is on nodes, because that is what the audio context is actually
+    // asked for - a pitched voice is two oscillators.
     if (this.voices >= MAX_VOICES) return; // voice stealing: drop rather than stall
     const gain = velocityToGain(item.velocity) * 0.5;
     if (gain < 0.0005) return;
@@ -169,7 +321,11 @@ export class Player {
         if (i >= 0) this.active.splice(i, 1);
       };
     }
-    this.voices++;
+    // Counted per node, not per note. A pitched voice is two detuned oscillators
+    // and each one reports its own end, so counting one per note let the count
+    // drift downwards until it went negative - and a negative count never reaches
+    // MAX_VOICES, so the cap quietly stopped capping anything.
+    this.voices += nodes.length;
   }
 
   /** Percussive: noise burst, pitch sweep, or both, chosen by MIDI note number. */
@@ -183,6 +339,23 @@ export class Player {
     const isSnare = note === 37 || note === 38 || note === 39 || note === 40;
     const isOpen = note === 46 || note === 49 || note === 50 || note === 51 || note === 52 || note === 55;
     const isHat = note >= 41 && note <= 46;
+
+    // A count-in click: a short pitched blip, not a noise burst. It has to be
+    // distinguishable from the hi-hat the style itself is playing, or counting in
+    // over a drum part just makes the hats harder to hear.
+    if (item.isCountIn) {
+      const osc = ctx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.value = midiToHz(note);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(gain * 0.5, when);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.04);
+      osc.connect(g).connect(out);
+      osc.start(when);
+      osc.stop(when + 0.05);
+      out.gain.value = 1;
+      return [osc];
+    }
 
     const stopAt = when + (isOpen ? 1.2 : isHat ? 0.06 : isKick ? 0.35 : 0.18);
 
@@ -311,5 +484,15 @@ export class Player {
   position() {
     if (!this.playing) return 0;
     return Math.max(0, (this.ctx.currentTime - this.startedAt) * this.speed);
+  }
+
+  /** Which part of the file is playing, as a tick range, for the status line. */
+  playingRegion() {
+    if (!this.playing || !this.region) return null;
+    return {
+      startTick: this.regionFrom ?? 0,
+      endTick: this.regionTo,
+      loops: this.loops,
+    };
   }
 }
