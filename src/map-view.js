@@ -148,8 +148,8 @@ export class MapView {
 
   /** The name this channel carries *in this section*, which is not always one name. */
   #partNameIn(section, part) {
-    const record = section.records.find((r) => r.channel === part.channel);
-    return record?.name ?? part.names[0] ?? `ch ${part.channel + 1}`;
+    const entry = section.parts.find((p) => p.channel === part.channel);
+    return entry?.name ?? part.names[0] ?? `ch ${part.channel + 1}`;
   }
 
   #actions(section) {

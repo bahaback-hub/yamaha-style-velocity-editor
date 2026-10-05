@@ -9,7 +9,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readStyleStructure, parseCasm, voiceFamily, sectionLabel, summariseByChannel } from '../src/sections.js';
+import { readStyleStructure, voiceFamily, sectionLabel, summariseByChannel } from '../src/sections.js';
+import { parseCasm } from '../src/cseg.js';
 import { resolveMeter, detectBlocks, presencePerBar, MAX_BARS, BLOCK_SOURCE } from '../src/timeline.js';
 import { indexNotes, tickToSeconds, ticksPerBar } from '../src/smf.js';
 
@@ -34,13 +35,27 @@ function concat(parts) {
 const name8 = (s) => Uint8Array.from([...s.padEnd(8, ' ')].map((c) => c.charCodeAt(0)));
 const bytes = (s) => Uint8Array.from([...s].map((c) => c.charCodeAt(0)));
 
+/**
+ * A CASM in the real format: one CSEG group per variation, an Sdec holding the
+ * variation's name, then one 47-byte Ctb2 per part. The old fixture here wrote a
+ * 0x2F marker that the format does not contain, which is how a fixture and the
+ * reader it was testing came to disagree.
+ */
 function casmFixture(groups) {
-  const bodies = groups.map((g) =>
-    chunk('CSEG', concat([
-      chunk('Sdec', concat([bytes(g.sections.join(',')), Uint8Array.from([0, 0, 0, 0])])),
-      ...g.voices.map((v) => Uint8Array.from([0x2f, v.ch, ...name8(v.name)])),
-    ])),
-  );
+  const bodies = groups.map((g) => chunk('CSEG', concat([
+    chunk('Sdec', bytes(g.sections[0] ?? '')),
+    ...g.voices.map((v) => {
+      const body = new Uint8Array(47);
+      body[0] = v.ch;
+      body.set(name8(v.name), 1, 8);
+      body[9] = v.ch;
+      body[11] = 0x0f; body[12] = 0x0f;
+      body[19] = 0;
+      body[20] = 0; body[21] = 127;
+      for (const at of [22, 28, 34]) { body[at] = 0; body[at + 1] = 1; body[at + 2] = 0; body[at + 3] = 0; body[at + 4] = 127; body[at + 5] = 0; }
+      return chunk('Ctb2', body);
+    }),
+  ])));
   return chunk('CASM', concat(bodies));
 }
 
@@ -63,10 +78,15 @@ const toBuf = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLeng
 // ---- CASM -------------------------------------------------------------------
 
 test('reads declared sections and channel voices from CASM', () => {
+  // One CSEG group per variation, each naming itself. The earlier fixture packed
+  // two names into one Sdec separated by a comma, which the old reader had to
+  // split on; real files do not do that, and the old leniency was a symptom of it
+  // mis-parsing the chunk rather than of the format.
   const file = concat([
     smfFixture([0x00, 0x99, 36, 100, 0x60, 0x89, 36, 0]),
     casmFixture([
-      { sections: ['Main A', 'Fill In AA'], voices: [{ ch: 10, name: 'MainDrum' }, { ch: 12, name: 'Bass' }] },
+      { sections: ['Main A'], voices: [{ ch: 10, name: 'MainDrum' }, { ch: 12, name: 'Bass' }] },
+      { sections: ['Fill In AA'], voices: [{ ch: 10, name: 'MainDrum' }] },
       { sections: ['Intro B'], voices: [{ ch: 8, name: 'AddDrum' }] },
     ]),
   ]);
@@ -74,8 +94,8 @@ test('reads declared sections and channel voices from CASM', () => {
 
   assert.equal(st.found, true);
   assert.deepEqual(st.declaredSections, ['Main A', 'Fill In AA', 'Intro B']);
-  assert.equal(st.groups.length, 2);
-  assert.deepEqual(st.groups[0].sections, ['Main A', 'Fill In AA']);
+  assert.equal(st.groups.length, 3);
+  assert.deepEqual(st.groups[0].sections, ['Main A']);
   assert.deepEqual(st.groups[0].voices.map((v) => v.name), ['MainDrum', 'Bass']);
   // The channel byte is the zero-based channel the notes use, with no shift. This
   // used to be read as one-based and have one subtracted, which put every part name
@@ -83,6 +103,29 @@ test('reads declared sections and channel voices from CASM', () => {
   // declares 9-15 here.
   assert.equal(st.voices.find((v) => v.name === 'Bass').channel, 12);
   assert.equal(st.voices.find((v) => v.name === 'MainDrum').channel, 10);
+});
+
+test('the map reader and the structure reader agree on every part', () => {
+  const file = concat([
+    smfFixture([0x00, 0x99, 36, 100, 0x60, 0x89, 36, 0]),
+    casmFixture([
+      { sections: ['Main A'], voices: [{ ch: 10, name: 'MainDrum' }] },
+      { sections: ['Intro B'], voices: [{ ch: 8, name: 'AddDrum' }] },
+    ]),
+  ]);
+  const buffer = toBuf(file);
+  const fromStructure = readStyleStructure(buffer);
+  const fromCseg = parseCasm(buffer);
+  // Two readers used to be able to disagree. There is one reader now; this asserts
+  // the shape the interface depends on still lines up with it.
+  assert.deepEqual(
+    fromStructure.groups.map((g) => g.sections[0]),
+    fromCseg.sections.map((s) => s.name),
+  );
+  assert.deepEqual(
+    fromStructure.groups[0].voices.map((v) => [v.channel, v.name]),
+    fromCseg.sections[0].parts.map((p) => [p.channel, p.name]),
+  );
 });
 
 test('a part name lands on the channel whose notes it belongs to', () => {

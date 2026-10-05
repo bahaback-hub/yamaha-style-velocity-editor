@@ -2,15 +2,20 @@
  * Style structure: which sections a style declares, and which channel carries
  * which voice.
  *
- * This reads the CASM chunk found in exported `.STY` files. CASM holds a series
- * of CSEG groups; each group names the sections it covers and then lists the
- * channels inside it with their voice names ("MainDrum", "NylonGtr", ...).
+ * The map itself is read by `cseg.js`, which is the single reader for the CASM
+ * format. This module turns what it finds into the shape the interface wants:
+ * part names grouped by family, and a list of the variations the style declares.
  *
- * What it cannot give is the note-to-section attribution. In these exports the
- * whole performance is one flattened MIDI timeline with no section boundaries in
- * time, so the section names are the *original style's* declaration, not a
- * description of what plays when. `declaredSectionsPresentInFile` exists to keep
- * that distinction visible instead of letting the caller imply otherwise.
+ * An earlier version of this file had its own CASM parser, and two readers of one
+ * format is how they come to disagree - this one went on looking for a 0x2F marker
+ * the format does not contain and reported no part names at all.
+ *
+ * Note on attribution: this used to claim that variations could not be told apart
+ * in time, because these exports flatten the performance into one timeline. That is
+ * only half true. The performance carries MIDI marker events naming each variation,
+ * so the boundaries *are* recorded - see `buildSectionSpans` in `smf.js`. What CASM
+ * does not carry is the boundaries, and this module reports that; `smf.js` reports
+ * the boundaries. They can be checked against each other, and are.
  */
 
 /**
@@ -21,9 +26,11 @@
  *
  * @typedef {object} SectionGroup
  * @property {number} index
- * @property {string[]} sections names as declared, e.g. ["Main A", "Intro A"]
+ * @property {string[]} sections names as declared, one per group
  * @property {VoiceName[]} voices
  */
+
+import { parseCasm } from './cseg.js';
 
 /** Map a Yamaha voice name onto a coarse family for display and timbre. */
 export function voiceFamily(name) {
@@ -56,127 +63,54 @@ export function sectionLabel(name) {
 /**
  * Parse the CASM chunk of an exported style.
  *
- * @param {DataView} view
- * @param {number} casmOffset absolute offset of the CASM chunk header
- * @param {number} casmLength length declared by that header
- * @returns {{groups: SectionGroup[], declaredSections: string[], voices: VoiceName[]}}
- */
-export function parseCasm(view, casmOffset, casmLength) {
-  const groups = [];
-  const declaredSections = [];
-  const voices = [];
-  const end = casmOffset + 8 + casmLength;
-
-  const idAt = (p) => String.fromCharCode(...new Uint8Array(view.buffer, view.byteOffset + p, 4));
-
-  let p = casmOffset + 8;
-  while (p + 8 <= end) {
-    if (idAt(p) !== 'CSEG') {
-      p++;
-      continue;
-    }
-    const groupLen = view.getUint32(p + 4);
-    const groupEnd = Math.min(p + 8 + groupLen, end);
-
-    /** @type {string[]} */
-    let sections = [];
-    /** @type {VoiceName[]} */
-    const groupVoices = [];
-    let q = p + 8;
-
-    while (q + 4 <= groupEnd) {
-      // A section declaration: "Sdec" + a length, then comma-separated names.
-      if (idAt(q) === 'Sdec') {
-        const nameLen = view.getUint32(q + 4);
-        const body = q + 8;
-        if (nameLen > 0 && body + nameLen <= groupEnd) {
-          // The declared length runs past the text into whatever padding or the
-          // next chunk id follows, so read the bytes and cut at the first
-          // character that cannot belong to a section name.
-          const raw = new Uint8Array(view.buffer, view.byteOffset + body, nameLen);
-          let text = '';
-          for (const b of raw) {
-            if (b === 0) break; // null padding ends the string
-            text += String.fromCharCode(b);
-          }
-          for (const part of text.split(',')) {
-            const name = part.trim();
-            if (/^[A-Za-z][A-Za-z0-9 /-]{0,23}$/.test(name)) {
-              sections.push(name);
-              if (!declaredSections.includes(name)) declaredSections.push(name);
-            }
-          }
-        }
-        q = body + nameLen;
-        continue;
-      }
-
-      // A channel entry: 0x2F, the channel number, then a padded 8-byte name.
-      if (view.getUint8(q) === 0x2f) {
-        const ch = view.getUint8(q + 1);
-        // The channel byte is the same zero-based number the MIDI events use. A
-        // style whose parts sit on channels 9-15 one-based declares 9-15 here, and
-        // subtracting one shifted every part name onto the wrong channel - which
-        // then either failed to match its notes or matched a neighbour's.
-        if (ch >= 0 && ch <= 15) {
-          let raw = '';
-          for (const b of new Uint8Array(view.buffer, view.byteOffset + q + 2, 8)) {
-            raw += String.fromCharCode(b);
-          }
-          const name = raw.replace(/\s+$/g, '').trim();
-          if (name) {
-            const voice = { channel: ch, name, family: voiceFamily(name) };
-            groupVoices.push(voice);
-            if (!voices.some((v) => v.channel === voice.channel && v.name === voice.name)) {
-              voices.push(voice);
-            }
-          }
-        }
-        q += 10;
-        continue;
-      }
-
-      q++;
-    }
-
-    if (sections.length || groupVoices.length) {
-      groups.push({ index: groups.length, sections, voices: groupVoices });
-    }
-    p = groupEnd;
-  }
-
-  return { groups, declaredSections, voices };
-}
-
-/**
- * Locate the CASM chunk in a bare-MIDI style and parse it.
+ * This delegates to `cseg.js`, which is the one reader for this format. An earlier
+ * version had its own parser here, and two readers of one format is how they come
+ * to disagree: the copy in this file went on looking for a 0x2F marker that the
+ * format does not have, and silently reported no part names at all. There is one
+ * reader now, and it is tested against every style in the collection.
  *
  * @param {ArrayBuffer} buffer
  * @returns {{groups: SectionGroup[], declaredSections: string[], voices: VoiceName[], found: boolean}}
  */
 export function readStyleStructure(buffer) {
-  const view = new DataView(buffer);
-  const bytes = new Uint8Array(buffer);
-  const idAt = (p) => String.fromCharCode(...bytes.subarray(p, p + 4));
+  /** @type {SectionGroup[]} */
+  const groups = [];
+  /** @type {string[]} */
+  const declaredSections = [];
+  /** @type {VoiceName[]} */
+  const voices = [];
 
-  // Only a bare SMF carries CASM at the top level; an SFF container keeps its
-  // metadata in Smed/Sins and is not handled here.
-  if (idAt(0) !== 'MThd') {
-    return { groups: [], declaredSections: [], voices: [], found: false };
+  let casm = null;
+  try {
+    casm = parseCasm(buffer);
+  } catch {
+    // A map in a layout this reader does not understand is reported as absent
+    // rather than taking the page down; the notes are still editable.
+    return { groups, declaredSections, voices, found: false };
   }
+  if (!casm) return { groups, declaredSections, voices, found: false };
 
-  let p = 8 + view.getUint32(4);
-  while (p + 8 <= bytes.length) {
-    const id = idAt(p);
-    const len = view.getUint32(p + 4);
-    if (id === 'CASM') {
-      const parsed = parseCasm(view, p, len);
-      return { ...parsed, found: true };
+  for (const section of casm.sections) {
+    /** @type {VoiceName[]} */
+    const groupVoices = [];
+    for (const part of section.parts) {
+      const voice = {
+        channel: part.channel,
+        name: part.name,
+        family: voiceFamily(part.name),
+      };
+      groupVoices.push(voice);
+      if (!voices.some((v) => v.channel === voice.channel && v.name === voice.name)) {
+        voices.push(voice);
+      }
     }
-    if (id !== 'MTrk' && id !== 'OTSc' && id !== 'CSEG') break;
-    p += 8 + len;
+    if (section.name && !declaredSections.includes(section.name)) {
+      declaredSections.push(section.name);
+    }
+    groups.push({ index: section.index, sections: section.name ? [section.name] : [], voices: groupVoices });
   }
-  return { groups: [], declaredSections: [], voices: [], found: false };
+
+  return { groups, declaredSections, voices, found: true };
 }
 
 /**

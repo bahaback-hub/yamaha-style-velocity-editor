@@ -473,10 +473,12 @@ const mapBuf = toBuf(mapBytes);
 const casmAfter = parseCasm(mapBuf);
 check('Main B now declares the bass part', casmAfter.sections[1].channels.includes(11),
   casmAfter.sections[1].channels.join(','));
-const bassRecord = casmAfter.sections[1].records.find((r) => r.channel === 11);
-const donor = parseCasm(toBuf(originalBytes)).sections[0].records.find((r) => r.channel === 11);
+const bassPart = casmAfter.sections[1].parts.find((p) => p.channel === 11);
+const donor = parseCasm(toBuf(originalBytes)).sections[0].parts.find((p) => p.channel === 11);
 check('the added part brought its voice settings with it',
-  JSON.stringify([...bassRecord.params]) === JSON.stringify([...donor.params]),
+  JSON.stringify([...bassPart.reserved]) === JSON.stringify([...donor.reserved])
+  && bassPart.chordType === donor.chordType
+  && bassPart.low.highLimit === donor.low.highLimit,
   'otherwise the arranger could not play it');
 
 // And the notes must be exactly as they were.

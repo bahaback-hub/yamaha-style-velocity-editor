@@ -138,6 +138,15 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
   /** Raw events per track, so a track can be re-emitted byte-for-byte. */
   /** @type {{events: TrackEvent[], trackIndex: number, start: number, length: number}[]} */
   const trackList = [];
+  /**
+   * Marker and cue events, in the order they appear. These carry the variation
+   * boundaries, so they are collected as first-class data rather than left inside
+   * the opaque event bytes.
+   * @type {{tick: number, name: string, kind: 'marker'|'cue'}[]}
+   */
+  const markers = [];
+  /** @type {number|null} */
+  let endOfTrackTick = null;
 
   while (p + 8 <= limit && str(view, p, p + 4) === 'MTrk') {
     const trackLen = view.getUint32(p + 4);
@@ -203,9 +212,31 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
               numerator: view.getUint8(body),
               denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
             };
+          } else if ((type === 0x06 || type === 0x07) && len.value > 0) {
+            // A marker, or a cue point. Yamaha styles use these to say where each
+            // variation begins in time - the performance is flattened into one
+            // timeline and the markers are the only record of the boundaries. They
+            // used to be stored here as opaque bytes and ignored, which is how the
+            // tool came to believe that variations could not be told apart in time.
+            // They can.
+            let text = '';
+            for (let k = 0; k < len.value; k++) {
+              const c = view.getUint8(body + k);
+              text += c >= 0x20 && c < 0x7f ? String.fromCharCode(c) : ' ';
+            }
+            const name = text.replace(/[\s\0]+$/, '');
+            if (name) {
+              markers.push({ tick: abs, name, kind: type === 0x06 ? 'marker' : 'cue' });
+            }
+          } else if (type === 0x2f) {
+            // End of track: the last variation ends here rather than at the end of
+            // the data, which may be nothing at all.
+            endOfTrackTick = abs;
           }
           events.push({
             kind: 'meta',
+            metaType: type,
+            text: undefined,
             tick: abs,
             bytes: Array.from(new Uint8Array(view.buffer, view.byteOffset + startByte, cursor - startByte)),
           });
@@ -309,7 +340,61 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
     trackIndex++;
   }
 
-  return { notes, tracks: trackIndex, division, layout: 'smf', tempoMap, timeSignature, lengthTicks, trackList };
+  return {
+    notes, tracks: trackIndex, division, layout: 'smf',
+    tempoMap, timeSignature, lengthTicks, trackList,
+    markers, sectionSpans: buildSectionSpans(markers, lengthTicks, endOfTrackTick),
+  };
+}
+
+/**
+ * Turn markers into the spans they describe.
+ *
+ * A marker says "a variation starts here", so each one opens a span that runs to
+ * the next marker. Anything before the first marker is a prologue and anything
+ * after the last marker up to the end of track is an epilogue - both are real, and
+ * both used to be invisible.
+ *
+ * The same name can legitimately appear more than once: a style that repeats a
+ * variation mid-form has one marker each time, and each is its own span. They are
+ * kept apart, and `index` counts them, because merging them would put notes from
+ * two different places under one heading.
+ *
+ * @param {{tick: number, name: string, kind: string}[]} markers in file order
+ * @param {number} lengthTicks the end of the performance
+ * @param {number|null} endOfTrackTick where the track says it ends, if it says
+ * @returns {{name: string, startTick: number, endTick: number, index: number, markerIndex: number|null}[]}
+ */
+export function buildSectionSpans(markers, lengthTicks, endOfTrackTick = null) {
+  /** @type {{name: string, startTick: number, endTick: number, index: number, markerIndex: number|null}[]} */
+  const spans = [];
+  const hardEnd = endOfTrackTick !== null && endOfTrackTick > 0 ? endOfTrackTick : lengthTicks;
+
+  if (markers.length === 0) {
+    if (hardEnd > 0) spans.push({ name: 'Performance', startTick: 0, endTick: hardEnd, index: 0, markerIndex: null });
+    return spans;
+  }
+
+  // Notes can precede the first marker - a count-in, or a pickup. Without this the
+  // first bar of every style would fall into no variation at all.
+  if (markers[0].tick > 0) {
+    spans.push({ name: 'Prologue', startTick: 0, endTick: markers[0].tick, index: 0, markerIndex: null });
+  }
+
+  markers.forEach((marker, i) => {
+    const next = markers[i + 1];
+    const endTick = next ? next.tick : hardEnd;
+    if (endTick <= marker.tick) return;
+    spans.push({
+      name: marker.name,
+      startTick: marker.tick,
+      endTick,
+      index: spans.length,
+      markerIndex: i,
+    });
+  });
+
+  return spans;
 }
 
 /**

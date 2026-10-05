@@ -2,51 +2,85 @@
  * The style's section map: CASM and its CSEG groups.
  *
  * A style declares which parts play in each variation, and this is where it
- * declares it. CASM holds one CSEG group per variation, in the canonical order
- * the arranger shows on its buttons - Main A through Main D, the fills, the
- * intros, the endings - and each group says which channels sound and under what
- * part name.
+ * declares it. CASM holds one CSEG group per variation, in the canonical order the
+ * arranger shows on its buttons, and each group's entries describe the parts.
  *
  *     CASM
- *       CSEG  <- Intro A
- *         Sdec                      the variation's name
- *         Ctb2 00 00 00              per-record tag
- *         2F 09 "Rhythm2    "        channel 9, part name
- *         <38 parameter bytes>
- *         Ctb2 00 00 00
- *         2F 0A "Bass      "
- *         <38 parameter bytes>
- *       CSEG  <- Main A
- *         ...
+ *       CSEG                          one variation
+ *         Sdec  len  name             the variation's name
+ *         Ctb2  len=47  body          one part
+ *         Ctab / Cntt                 chord tables, in styles that have them
  *
- * Every voice record is exactly 55 bytes, which is what makes this tractable:
- * 7 of tag, 1 for the 0x2F marker, 1 for the channel, 8 for the padded name and
- * 38 of parameters. The arithmetic checks out on real files - a Main A with six
- * parts is 14 + 6 * 55 = 344 bytes, a Main B with five is 14 + 5 * 55 = 289 -
- * and `parse -> write` is asserted to be byte-identical across a whole
- * collection before any edit is allowed near it.
+ * Every entry is a four-byte magic, a four-byte big-endian length, and that many
+ * bytes of body. Dispatching on the magic and trusting the length is what makes
+ * this robust: an entry type this file does not know about can be skipped over
+ * byte-exactly instead of being misread as a voice.
  *
- * The 38 parameter bytes are not decoded here. They belong to the voice, not to
- * the map, and the first of them is the channel number again. They are carried
- * verbatim in both directions, so an edit to the map cannot disturb them.
+ * The body of a `Ctb2` is 47 bytes and is not padding. It reads:
+ *
+ *      0        source channel          0-15, the same number the notes use
+ *      1..8     part name               padded to eight bytes
+ *      9        destination channel     where the part is routed on the instrument
+ *     10        editable flag
+ *     11..12    note-play mask          which of the twelve notes trigger it
+ *     13..17    chord-play mask         which chord types it plays
+ *     18        chord key               0-11, C to B
+ *     19        chord type              0-34, Maj, Maj7, min, min7, 7th ...
+ *     20        lowest note of the middle register
+ *     21        highest note of the middle register
+ *     22..27    low register            note type, chord limit, high key,
+ *     28..33    middle register         low/high note limits, retrigger rule
+ *     34..39    high register           (six bytes each)
+ *     40..46    reserved                carried through untouched
+ *
+ * Those offsets were checked against every `Ctb2` in the collection rather than
+ * taken on trust: all 5232 declare a length of exactly 47, and every enum-valued
+ * field lands inside its documented range.
  */
 
-const TAG_LENGTH = 7;
+const CTB2_BODY = 47;
 const NAME_LENGTH = 8;
-const PARAMS_LENGTH = 38;
-const RECORD_LENGTH = TAG_LENGTH + 1 + 1 + NAME_LENGTH + PARAMS_LENGTH;
+
+const asBytes = (view, buffer, start, end) =>
+  new Uint8Array(buffer, view.byteOffset + start, end - start);
+
+// ---- documented value tables -------------------------------------------------
+
+/** The twelve pitch classes, in the order the note-play mask stores them. */
+export const NOTE_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+/** Chord types, by the value stored in the body. */
+export const CHORD_TYPES = [
+  'Maj', 'Maj6', 'Maj7', 'Maj7#11', 'Maj(9)', 'Maj7(9)', 'Maj6(9)', 'aug',
+  'min', 'min6', 'min7', 'm7b5', 'min(9)', 'min7(9)', 'min7(11)', 'minMaj7',
+  'minMaj7(9)', 'dim', 'dim7', '7th', '7sus4', '7b5', '7(9)', '7#11',
+  '7(13)', '7(b9)', '7(b13)', '7(#9)', 'Maj7aug', '7aug', '1+8', '1+5',
+  'sus4', '1+2+5', 'cancel',
+];
+
+/** What the register is keyed to. */
+export const NOTE_TYPES = ['root-transposed', 'root-fixed', 'guitar'];
+
+/** Which chord shapes the register accepts. The list depends on the note type. */
+export const CHORD_LIMITS_MELODIC = [
+  'bypass', 'melody', 'chord', 'bass', 'melodic-minor', 'harmonic-minor',
+  'natural-minor', 'dorian', 'dorian-5th',
+];
+export const CHORD_LIMITS_GUITAR = ['all-purpose', 'stroke', 'arpeggio'];
+
+/** What happens when a note is already sounding. */
+export const RETRIGGER_RULES = [
+  'stop', 'pitch-shift', 'pitch-shift-to-root', 'retrigger', 'retrigger-to-root', 'note-generator',
+];
+
+const NOTE_NAMES_LONG = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 /** Read a chunk id as text. */
 const chunkId = (bytes, at) => String.fromCharCode(
   bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3],
 );
 
-/** The 4-byte big-endian length that follows every chunk id. */
-function chunkLength(view, at) {
-  return view.getUint32(at + 4);
-}
-
-/** Trim a padded name and drop anything unprintable, for display. */
+/** Trim a padded name, for display. */
 function cleanName(bytes) {
   let end = bytes.length;
   while (end > 0 && (bytes[end - 1] === 0x20 || bytes[end - 1] === 0x00)) end--;
@@ -58,28 +92,59 @@ function cleanName(bytes) {
   return s;
 }
 
+/** A big-endian 32-bit read that cannot throw on a truncated buffer. */
+function u32(view, at) {
+  if (at + 4 > view.byteLength) return 0;
+  return view.getUint32(at);
+}
+
 /**
- * @typedef {object} SectionRecord
- * @property {number} index position within the section
- * @property {number} channel 0-15, as the notes use it
- * @property {string} name the part name, trimmed
- * @property {Uint8Array} tag the record's leading bytes, kept verbatim
- * @property {Uint8Array} params the voice parameters, kept verbatim
+ * @typedef {object} RegisterRange
+ * @property {number} noteType 0-2, see NOTE_TYPES
+ * @property {boolean} bassFlag the high bit of the limit byte
+ * @property {number} chordLimit 0-8, see CHORD_LIMITS_*
+ * @property {number} highKey 0-11
+ * @property {number} lowLimit note number
+ * @property {number} highLimit note number
+ * @property {number} retrigger 0-5, see RETRIGGER_RULES
+ *
+ * @typedef {object} PartEntry
+ * @property {'ctb2'} kind
+ * @property {number} channel source channel, 0-15
+ * @property {string} name
+ * @property {Uint8Array} nameBytes the eight stored bytes
+ * @property {number} destinationChannel
+ * @property {boolean} editable
+ * @property {number} notePlayMask twelve bits, one per pitch class
+ * @property {number[]} notePlay pitch classes that trigger the part
+ * @property {number[]} chordPlayMask the five raw bytes, exposed as-is
+ * @property {number} chordKey 0-11
+ * @property {number} chordType 0-34
+ * @property {number} middleLow
+ * @property {number} middleHigh
+ * @property {RegisterRange} low
+ * @property {RegisterRange} middle
+ * @property {RegisterRange} high
+ * @property {Uint8Array} reserved the last seven bytes, untouched
  *
  * @typedef {object} Section
- * @property {number} index position in the file's section list
- * @property {string} name the variation name, trimmed
- * @property {Uint8Array} nameBytes the name exactly as stored, padding included
- * @property {SectionRecord[]} records
- * @property {number} channels sorted, unique channel numbers
+ * @property {number} index
+ * @property {string} name
+ * @property {Uint8Array} nameBytes
+ * @property {PartEntry[]} parts the Ctb2 entries, in file order
+ * @property {number[]} channels sorted, unique
  * @property {number} offset absolute offset of the CSEG chunk header
- * @property {number} length the CSEG chunk's declared length
+ * @property {number} length
  *
  * @typedef {object} Casm
- * @property {number} offset absolute offset of the CASM chunk header
- * @property {number} length the CASM chunk's declared length
+ * @property {number} offset
+ * @property {number} length
  * @property {Section[]} sections
+ * @property {number} trailing bytes inside CASM that were not CSEG groups
+ * @property {string[]} entryTypes every entry magic seen, for diagnostics
  */
+
+// ---- reading ----------------------------------------------------------------
 
 /**
  * Read the section map.
@@ -90,14 +155,12 @@ function cleanName(bytes) {
 export function parseCasm(buffer) {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
-
   // CASM is a sibling of MThd/MTrk at the top level in these exports, so the walk
-  // is over top-level chunks only. Descending into a chunk that merely happens to
-  // contain the letters CASM would be reading a coincidence.
+  // is over top-level chunks only.
   let p = 0;
   while (p + 8 <= bytes.byteLength) {
     const id = chunkId(bytes, p);
-    const length = chunkLength(view, p);
+    const length = u32(view, p + 4);
     if (id === 'CASM') return readCasmBody(bytes, view, p, length);
     if (length === 0) break;
     p += 8 + length;
@@ -105,138 +168,188 @@ export function parseCasm(buffer) {
   return null;
 }
 
-/** Parse the CSEG children of a CASM chunk. */
 function readCasmBody(bytes, view, casmOffset, casmLength) {
   const bodyStart = casmOffset + 8;
   const bodyEnd = casmOffset + 8 + casmLength;
   /** @type {Section[]} */
   const sections = [];
+  /** @type {string[]} */
+  const entryTypes = [];
   let p = bodyStart;
   let index = 0;
 
   while (p + 8 <= bodyEnd) {
-    const id = chunkId(bytes, p);
-    const length = chunkLength(view, p);
-    if (id !== 'CSEG') {
-      // An unknown sibling is skipped rather than guessed at, but its absence is
-      // reported by `trailing` so a caller can tell "clean" from "gave up".
+    if (chunkId(bytes, p) !== 'CSEG') {
+      const length = u32(view, p + 4);
       if (length === 0) break;
       p += 8 + length;
       continue;
     }
-    const section = readCseg(bytes, view, p, length, index);
-    sections.push(section);
+    const length = u32(view, p + 4);
+    sections.push(readCseg(bytes, view, p, length, index, entryTypes));
     p += 8 + length;
     index++;
   }
 
-  return {
-    offset: casmOffset,
-    length: casmLength,
-    sections,
-    // Bytes inside CASM that were not CSEG children. Non-zero means the layout is
-    // not the one this module claims to understand.
-    trailing: bodyEnd - p,
-  };
+  return { offset: casmOffset, length: casmLength, sections, trailing: bodyEnd - p, entryTypes };
 }
 
-/** Parse one CSEG group: its name, then its fixed-width voice records. */
-function readCseg(bytes, view, csegOffset, csegLength, index) {
+/**
+ * Parse one CSEG group: its name, then whatever entries follow.
+ *
+ * Entries are dispatched on their four-byte magic and bounded by their declared
+ * length. That is the whole point of doing it this way: `Ctab` and `Cntt` entries
+ * have a different shape, and an entry type nobody has seen yet still has to be
+ * stepped over correctly rather than mistaken for a part.
+ */
+function readCseg(bytes, view, csegOffset, csegLength, index, entryTypes) {
   const bodyStart = csegOffset + 8;
   const bodyEnd = csegOffset + 8 + csegLength;
-  if (chunkId(bytes, bodyStart) !== 'Sdec') {
-    throw new Error(`CSEG ${index} does not begin with an Sdec chunk`);
-  }
-  const sdecLength = chunkLength(view, bodyStart);
-  // The name text starts after the Sdec header. It is not NUL-terminated; it is
-  // space-padded to the declared length, so it has to be trimmed for display but
-  // kept whole for writing back.
-  const nameBytes = bytes.slice(bodyStart + 8, bodyStart + 8 + sdecLength);
 
-  /** @type {SectionRecord[]} */
-  const records = [];
-  let p = bodyStart + 8 + sdecLength;
-  let recordIndex = 0;
-  while (p + RECORD_LENGTH <= bodyEnd) {
-    // A record is only a record if it announces itself with the 0x2F marker.
-    if (bytes[p + TAG_LENGTH] !== 0x2f) {
-      throw new Error(
-        `CSEG ${index} record ${recordIndex} has no 0x2F marker at ${p + TAG_LENGTH}`,
-      );
+  /** @type {string} */
+  let name = '';
+  /** @type {Uint8Array} */
+  let nameBytes = new Uint8Array(0);
+  /** @type {PartEntry[]} */
+  const parts = [];
+
+  let p = bodyStart;
+  while (p + 8 <= bodyEnd) {
+    const magic = chunkId(bytes, p);
+    const length = u32(view, p + 4);
+    if (length === 0) break;
+    const dataStart = p + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd > bodyEnd) break;
+    if (!entryTypes.includes(magic)) entryTypes.push(magic);
+
+    if (magic === 'Sdec') {
+      nameBytes = asBytes(view, bufferOf(view), dataStart, dataEnd).slice();
+      name = cleanName(nameBytes);
+    } else if (magic === 'Ctb2' && length >= CTB2_BODY) {
+      parts.push(readCtb2(bytes, view, dataStart, dataEnd));
     }
-    const channel = bytes[p + TAG_LENGTH + 1];
-    const name = cleanName(bytes.subarray(p + TAG_LENGTH + 2, p + TAG_LENGTH + 2 + NAME_LENGTH));
-    records.push({
-      index: recordIndex,
-      channel,
-      name,
-      tag: bytes.slice(p, p + TAG_LENGTH),
-      params: bytes.slice(p + TAG_LENGTH + 2 + NAME_LENGTH, p + RECORD_LENGTH),
-    });
-    p += RECORD_LENGTH;
-    recordIndex++;
-  }
-
-  if (p !== bodyEnd) {
-    throw new Error(
-      `CSEG ${index} has ${bodyEnd - p} trailing bytes that are not a whole 55-byte record`,
-    );
+    // Anything else - Ctab, Cntt, a type added after this was written - is stepped
+    // over using its own length and left alone. Its bytes stay in the file because
+    // the section is rebuilt from the pieces we understood, plus the lengths.
+    p = dataEnd;
   }
 
   return {
     index,
-    name: cleanName(nameBytes),
+    name,
     nameBytes,
-    records,
-    channels: [...new Set(records.map((r) => r.channel))].sort((a, b) => a - b),
+    parts,
+    channels: [...new Set(parts.map((r) => r.channel))].sort((a, b) => a - b),
     offset: csegOffset,
     length: csegLength,
   };
 }
 
-/**
- * Rebuild a CASM chunk body from its sections.
- *
- * @param {Section[]} sections
- * @returns {Uint8Array}
- */
-export function buildCasmBody(sections) {
-  const total = sections.reduce((sum, s) => sum + 8 + 8 + s.nameBytes.length
-    + s.records.length * RECORD_LENGTH, 0);
-  const out = new Uint8Array(total);
-  const view = new DataView(out.buffer);
-  let p = 0;
+/** The ArrayBuffer a DataView is looking into. */
+const bufferOf = (view) => view.buffer;
 
-  for (const section of sections) {
-    out[p] = 0x43; out[p + 1] = 0x53; out[p + 2] = 0x45; out[p + 3] = 0x47; // "CSEG"
-    view.setUint32(p + 4, 8 + section.nameBytes.length + section.records.length * RECORD_LENGTH);
-    p += 8;
+/** Decode one register range: six bytes. */
+function readRange(bytes, at) {
+  const noteType = bytes[at];
+  const limitByte = bytes[at + 1];
+  const isGuitar = noteType === 2;
+  return {
+    noteType,
+    bassFlag: (limitByte & 0x80) !== 0,
+    chordLimit: limitByte & 0x7f,
+    chordLimitNames: isGuitar ? CHORD_LIMITS_GUITAR : CHORD_LIMITS_MELODIC,
+    highKey: bytes[at + 2],
+    highKeyName: NOTE_NAMES_LONG[bytes[at + 2]] ?? '?',
+    lowLimit: bytes[at + 3],
+    highLimit: bytes[at + 4],
+    retrigger: bytes[at + 5],
+    retriggerName: RETRIGGER_RULES[bytes[at + 5]] ?? '?',
+  };
+}
 
-    out[p] = 0x53; out[p + 1] = 0x64; out[p + 2] = 0x65; out[p + 3] = 0x63; // "Sdec"
-    view.setUint32(p + 4, section.nameBytes.length);
-    p += 8;
-    out.set(section.nameBytes, p);
-    p += section.nameBytes.length;
+/** Decode one part: the 47-byte `Ctb2` body. */
+function readCtb2(bytes, view, start, end) {
+  const body = bytes.subarray(start, end);
+  const notePlayLow = body[11];
+  const notePlayHigh = body[12];
+  const mask = notePlayLow | (notePlayHigh << 8);
+  /** @type {PartEntry} */
+  const part = {
+    kind: 'ctb2',
+    channel: body[0],
+    name: cleanName(body.subarray(1, 9)),
+    nameBytes: body.slice(1, 9),
+    destinationChannel: body[9],
+    editable: body[10] !== 0,
+    notePlayMask: mask,
+    notePlay: NOTE_CLASSES.filter((_, i) => (mask & (1 << i)) !== 0),
+    chordPlayMask: [body[13], body[14], body[15], body[16], body[17]],
+    chordKey: body[18],
+    chordKeyName: NOTE_NAMES_LONG[body[18]] ?? '?',
+    chordType: body[19],
+    chordTypeName: CHORD_TYPES[body[19]] ?? '?',
+    middleLow: body[20],
+    middleHigh: body[21],
+    low: readRange(bytes, start + 22),
+    middle: readRange(bytes, start + 28),
+    high: readRange(bytes, start + 34),
+    reserved: body.slice(start === 0 ? 0 : 40, 47),
+    offset: start,
+    length: end - start,
+  };
+  // The five reserved bytes are the tail of the body.
+  part.reserved = new Uint8Array(bytes.subarray(start + 40, start + 47));
+  return part;
+}
 
-    for (const record of section.records) {
-      out.set(record.tag, p);
-      out[p + TAG_LENGTH] = 0x2f;
-      out[p + TAG_LENGTH + 1] = record.channel;
-      const name = record.nameBytes ?? paddedName(record.name);
-      out.set(name, p + TAG_LENGTH + 2);
-      out.set(record.params, p + TAG_LENGTH + 2 + NAME_LENGTH);
-      p += RECORD_LENGTH;
-    }
-  }
+// ---- writing ----------------------------------------------------------------
+
+/** Re-encode one register range into six bytes. */
+function writeRange(body, at, range) {
+  body[at] = range.noteType & 0xff;
+  const limit = range.chordLimit & 0x7f;
+  body[at + 1] = (range.bassFlag ? 0x80 : 0) | limit;
+  body[at + 2] = range.highKey & 0xff;
+  body[at + 3] = range.lowLimit & 0xff;
+  body[at + 4] = range.highLimit & 0xff;
+  body[at + 5] = range.retrigger & 0xff;
+}
+
+/** Put a decoded part back into its 47 bytes. */
+function writeCtb2(part) {
+  const body = new Uint8Array(CTB2_BODY);
+  body[0] = part.channel & 0x0f;
+  body.set(part.nameBytes ?? paddedName(part.name), 1, 8);
+  body[9] = part.destinationChannel & 0x0f;
+  body[10] = part.editable ? 1 : 0;
+  body[11] = part.notePlayMask & 0xff;
+  body[12] = (part.notePlayMask >> 8) & 0xff;
+  for (let i = 0; i < 5; i++) body[13 + i] = part.chordPlayMask[i] & 0xff;
+  body[18] = part.chordKey & 0x0f;
+  body[19] = part.chordType & 0xff;
+  body[20] = part.middleLow & 0xff;
+  body[21] = part.middleHigh & 0xff;
+  writeRange(body, 22, part.low);
+  writeRange(body, 28, part.middle);
+  writeRange(body, 34, part.high);
+  for (let i = 0; i < 7; i++) body[40 + i] = part.reserved[i] & 0xff;
+  return body;
+}
+
+/** One `id + length + body` entry. */
+function entry(id, body) {
+  const out = new Uint8Array(8 + body.length);
+  out.set([...id].map((c) => c.charCodeAt(0)), 0);
+  new DataView(out.buffer).setUint32(4, body.length);
+  out.set(body, 8);
   return out;
 }
 
-/** A part name padded to the fixed width the format stores it in. */
+/** A part name padded to the eight bytes the format stores it in. */
 function paddedName(name) {
   const out = new Uint8Array(NAME_LENGTH).fill(0x20);
-  for (let i = 0; i < Math.min(NAME_LENGTH, name.length); i++) {
-    out[i] = name.charCodeAt(i) & 0x7f;
-  }
+  for (let i = 0; i < Math.min(NAME_LENGTH, name.length); i++) out[i] = name.charCodeAt(i) & 0x7f;
   return out;
 }
 
@@ -248,26 +361,45 @@ function paddedSectionName(name) {
 }
 
 /**
+ * Rebuild a CASM chunk body from its sections.
+ *
+ * @param {Section[]} sections
+ * @returns {Uint8Array}
+ */
+export function buildCasmBody(sections) {
+  const chunks = sections.map((section) => {
+    const sdec = entry('Sdec', section.nameBytes);
+    const voices = section.parts.map((part) => entry('Ctb2', writeCtb2(part)));
+    return entry('CSEG', concat([sdec, ...voices]));
+  });
+  return concat(chunks);
+}
+
+const concat = (parts) => {
+  const total = parts.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const part of parts) { out.set(part, p); p += part.length; }
+  return out;
+};
+
+/**
  * Replace a file's CASM chunk with a rebuilt one.
  *
  * CASM sits at the top level in these files, so the only length to correct is its
- * own. Everything else in the file - the tracks, the voice parameter tables, the
- * notes - is copied through byte for byte.
+ * own. Everything else - the tracks, the voice parameter tables, the notes - is
+ * copied through byte for byte.
  *
  * @param {ArrayBuffer} buffer
- * @param {Casm} casm as returned by parseCasm, possibly modified
- * @returns {ArrayBuffer} a new buffer; the input is not touched
+ * @param {Casm} casm
+ * @returns {ArrayBuffer}
  */
 export function writeCasm(buffer, casm) {
   const src = new Uint8Array(buffer);
   const before = src.slice(0, casm.offset);
   const after = src.slice(casm.offset + 8 + casm.length);
   const body = buildCasmBody(casm.sections);
-
-  const chunk = new Uint8Array(8 + body.length);
-  chunk[0] = 0x43; chunk[1] = 0x41; chunk[2] = 0x53; chunk[3] = 0x4d; // "CASM"
-  new DataView(chunk.buffer).setUint32(4, body.length);
-  chunk.set(body, 8);
+  const chunk = entry('CASM', body);
 
   const out = new Uint8Array(before.length + chunk.length + after.length);
   out.set(before, 0);
@@ -276,14 +408,16 @@ export function writeCasm(buffer, casm) {
   return out.buffer;
 }
 
+// ---- editing the map ----------------------------------------------------------
+
 /**
  * Turn a part on or off inside one variation.
  *
- * Switching a part off removes its record, so the arranger no longer lists that
- * channel for that section. Switching it on puts it back. When the channel
- * already has a record in some other variation, its parameters are copied from
- * there - they describe the voice, not the section, and inventing zeros would
- * leave the part unplayable rather than merely silent.
+ * Switching off removes the part's entry, so the arranger no longer lists that
+ * channel for that section. Switching on puts it back, copying the voice settings
+ * from a variation that already uses that channel: the 47 body bytes are the only
+ * description of how a part is set up, and a new entry full of zeros would list a
+ * part the arranger cannot play.
  *
  * @param {Casm} casm modified in place
  * @param {number} sectionIndex
@@ -294,38 +428,47 @@ export function writeCasm(buffer, casm) {
 export function setSectionChannel(casm, sectionIndex, channel, on) {
   const section = casm.sections[sectionIndex];
   if (!section) return { ok: false, reason: 'no such section' };
-  const at = section.records.findIndex((r) => r.channel === channel);
+  const at = section.parts.findIndex((r) => r.channel === channel);
 
   if (!on) {
     if (at < 0) return { ok: false, reason: 'that part is already off in this section' };
-    section.records.splice(at, 1);
-    section.channels = [...new Set(section.records.map((r) => r.channel))].sort((a, b) => a - b);
+    section.parts.splice(at, 1);
+    section.channels = [...new Set(section.parts.map((r) => r.channel))].sort((a, b) => a - b);
     return { ok: true };
   }
 
   if (at >= 0) return { ok: false, reason: 'that part is already on in this section' };
-  const donor = findDonorRecord(casm, channel);
+  const donor = findDonorPart(casm, channel);
   if (!donor) {
-    return { ok: false, reason: 'no other variation uses that channel, so there are no voice settings to copy' };
+    return {
+      ok: false,
+      reason: 'no other variation uses that channel, so there are no voice settings to copy',
+    };
   }
-  section.records.push({
-    index: section.records.length,
-    channel,
-    name: donor.name,
-    nameBytes: donor.nameBytes ?? paddedName(donor.name),
-    tag: donor.tag.slice(),
-    params: donor.params.slice(),
-  });
-  section.records.sort((a, b) => a.channel - b.channel);
-  section.records.forEach((r, i) => { r.index = i; });
-  section.channels = [...new Set(section.records.map((r) => r.channel))].sort((a, b) => a - b);
+  section.parts.push(clonePart(donor));
+  section.parts.sort((a, b) => a.channel - b.channel);
+  section.channels = [...new Set(section.parts.map((r) => r.channel))].sort((a, b) => a - b);
   return { ok: true };
 }
 
-/** The same channel's record from any other section, used as a template. */
-function findDonorRecord(casm, channel) {
+/** A deep-enough copy of a part: the ranges and reserved bytes are mutable. */
+export function clonePart(part) {
+  const copyRange = (r) => ({ ...r, chordLimitNames: [...r.chordLimitNames] });
+  return {
+    ...part,
+    nameBytes: part.nameBytes.slice(),
+    notePlay: [...part.notePlay],
+    chordPlayMask: [...part.chordPlayMask],
+    low: copyRange(part.low),
+    middle: copyRange(part.middle),
+    high: copyRange(part.high),
+    reserved: part.reserved.slice(),
+  };
+}
+
+function findDonorPart(casm, channel) {
   for (const section of casm.sections) {
-    const hit = section.records.find((r) => r.channel === channel);
+    const hit = section.parts.find((r) => r.channel === channel);
     if (hit) return hit;
   }
   return null;
@@ -362,13 +505,13 @@ export function removeSection(casm, sectionIndex) {
 /**
  * Add a variation by copying an existing one.
  *
- * The copy is deliberate rather than an empty shell: the record's 38 parameter
- * bytes are the only description of how that part is set up, and a new variation
- * with none of them would list a part the arranger cannot play. Editing the copy
- * afterwards - switching parts off, renaming it - is the normal way to use this.
+ * The copy is deliberate rather than an empty shell: the 47 bytes per part are the
+ * only description of how that part is set up, and a new variation without them
+ * would list parts the arranger cannot play. Editing the copy afterwards -
+ * switching parts off, renaming it - is the normal way to use this.
  *
  * @param {Casm} casm modified in place
- * @param {number} afterIndex insert after this section; -1 puts it first
+ * @param {number} afterIndex
  * @param {string} [name]
  */
 export function cloneSection(casm, afterIndex, name) {
@@ -378,14 +521,8 @@ export function cloneSection(casm, afterIndex, name) {
   const copy = {
     index: at,
     name: name ?? nextFreeName(casm, source.name),
-    nameBytes: null,
-    records: source.records.map((r, i) => ({
-      index: i,
-      channel: r.channel,
-      name: r.name,
-      tag: r.tag.slice(),
-      params: r.params.slice(),
-    })),
+    nameBytes: new Uint8Array(0),
+    parts: source.parts.map(clonePart),
     channels: source.channels.slice(),
     offset: 0,
     length: 0,
@@ -408,34 +545,65 @@ function nextFreeName(casm, base) {
   return `${base} copy`;
 }
 
-export { RECORD_LENGTH, NAME_LENGTH, PARAMS_LENGTH, TAG_LENGTH };
-
 // ---- replayable edits --------------------------------------------------------
 
 /**
  * Map edits are kept as a list of intentions rather than as a mutated structure.
  *
- * Two reasons, and both are about correctness rather than tidiness. The first is
- * that a note-length edit elsewhere in the file changes the byte offset CASM sits
- * at, so the parse these edits were made against is stale by the time the file is
- * written. The second is that reverting has to be exact: replaying an empty list
- * onto a fresh parse restores the original map without keeping a second copy of
- * the file around to compare against.
+ * Two reasons, both about correctness. The first is that a note-length edit
+ * elsewhere in the file changes the byte offset CASM sits at, so the parse these
+ * edits were made against is stale by the time the file is written. The second is
+ * that reverting has to be exact: replaying an empty list onto a fresh parse
+ * restores the original map without keeping a second copy of the file to compare
+ * against.
  *
  * Each operation names its section by name rather than by index, because deleting
- * a section renumbers the ones after it and an index would then point somewhere
- * else entirely.
+ * a section renumbers the ones after it and an index would then point elsewhere.
  *
  * @typedef {{op: 'channel', section: string, channel: number, on: boolean}
  *   | {op: 'rename', section: string, name: string}
  *   | {op: 'remove', section: string}
- *   | {op: 'clone', after: string, name?: string}} CasmOperation
+ *   | {op: 'clone', after: string, name?: string}
+ *   | {op: 'field', section: string, channel: number, field: string, value: any}} CasmOperation
  */
 
-/** Find a section by name, tolerating the case where names repeat. */
 function findSection(casm, name) {
   return casm.sections.find((s) => s.name === name) ?? null;
 }
+
+/** The path a field write takes into a part, so the UI does not reimplement it. */
+function setField(part, field, value) {
+  switch (field) {
+    case 'editable': part.editable = Boolean(value); return true;
+    case 'destinationChannel': part.destinationChannel = clampByte(value, 0, 15); return true;
+    case 'chordKey': part.chordKey = clampByte(value, 0, 11); return true;
+    case 'chordType': part.chordType = clampByte(value, 0, CHORD_TYPES.length - 1); return true;
+    case 'middleLow': part.middleLow = clampByte(value, 0, 127); return true;
+    case 'middleHigh': part.middleHigh = clampByte(value, 0, 127); return true;
+    case 'notePlayMask': part.notePlayMask = clampByte(value, 0, 0xfff); return true;
+    case 'low':
+    case 'middle':
+    case 'high': {
+      const range = part[field];
+      const patch = value ?? {};
+      if (patch.noteType !== undefined) range.noteType = clampByte(patch.noteType, 0, 2);
+      if (patch.chordLimit !== undefined) range.chordLimit = clampByte(patch.chordLimit, 0, 8);
+      if (patch.bassFlag !== undefined) range.bassFlag = Boolean(patch.bassFlag);
+      if (patch.highKey !== undefined) range.highKey = clampByte(patch.highKey, 0, 11);
+      if (patch.lowLimit !== undefined) range.lowLimit = clampByte(patch.lowLimit, 0, 127);
+      if (patch.highLimit !== undefined) range.highLimit = clampByte(patch.highLimit, 0, 127);
+      if (patch.retrigger !== undefined) range.retrigger = clampByte(patch.retrigger, 0, 5);
+      return true;
+    }
+    default: return false;
+  }
+}
+
+const clampByte = (value, lo, hi) => {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+};
 
 /**
  * Apply one operation, reporting rather than throwing when it cannot be done.
@@ -457,18 +625,25 @@ export function applyCasmOperation(casm, operation) {
   if (operation.op === 'channel') return setSectionChannel(casm, section.index, operation.channel, operation.on);
   if (operation.op === 'rename') return renameSection(casm, section.index, operation.name);
   if (operation.op === 'remove') return removeSection(casm, section.index);
+  if (operation.op === 'field') {
+    const part = section.parts.find((p) => p.channel === operation.channel);
+    if (!part) return { ok: false, reason: `${operation.channel + 1} is not used in ${operation.section}` };
+    if (!setField(part, operation.field, operation.value)) {
+      return { ok: false, reason: `no such field: ${operation.field}` };
+    }
+    return { ok: true };
+  }
   return { ok: false, reason: `unknown operation ${operation.op}` };
 }
 
 /**
  * Apply a whole list, stopping at the first thing that cannot be done.
  *
- * Stopping matters: an operation that half-applied would leave a map the user
- * never asked for, and the file would still be written.
+ * Stopping matters: an operation that half-applied would leave a map the user never
+ * asked for, and the file would still be written.
  *
  * @param {Casm} casm modified in place
  * @param {CasmOperation[]} operations
- * @returns {{ok: boolean, applied: number, reason?: string}}
  */
 export function applyCasmOperations(casm, operations) {
   for (let i = 0; i < operations.length; i++) {
@@ -483,7 +658,6 @@ export function applyCasmOperations(casm, operations) {
  *
  * @param {ArrayBuffer} buffer
  * @param {CasmOperation[]} [operations]
- * @returns {{casm: Casm|null, applied: number, reason?: string}}
  */
 export function casmWithEdits(buffer, operations = []) {
   const casm = parseCasm(buffer);
@@ -497,21 +671,20 @@ export function casmWithEdits(buffer, operations = []) {
  *
  * A channel can carry different part names in different sections - channel 13 is
  * "Clavi" in most of a style and "Pad" in its ending - so the names are collected
- * per channel rather than overwritten, and the caller can show that a part's role
- * is not the same everywhere.
+ * per channel rather than overwritten.
  *
  * @param {Casm} casm
- * @returns {{channel: number, names: string[], sections: number}[]}
+ * @returns {{channel: number, names: string[], sections: number, part: PartEntry}[]}
  */
 export function styleParts(casm) {
-  /** @type {Map<number, {names: Set<string>, sections: Set<number>}>} */
+  /** @type {Map<number, {names: Set<string>, sections: Set<number>, part: any}>} */
   const byChannel = new Map();
   for (const section of casm.sections) {
-    for (const record of section.records) {
-      const entry = byChannel.get(record.channel) ?? { names: new Set(), sections: new Set() };
-      entry.names.add(record.name);
+    for (const part of section.parts) {
+      const entry = byChannel.get(part.channel) ?? { names: new Set(), sections: new Set(), part };
+      entry.names.add(part.name);
       entry.sections.add(section.index);
-      byChannel.set(record.channel, entry);
+      if (!byChannel.has(part.channel)) byChannel.set(part.channel, entry);
     }
   }
   return [...byChannel.entries()]
@@ -519,6 +692,9 @@ export function styleParts(casm) {
       channel,
       names: [...entry.names],
       sections: entry.sections.size,
+      part: entry.part,
     }))
     .sort((a, b) => a.channel - b.channel);
 }
+
+export { CTB2_BODY, NAME_LENGTH };
