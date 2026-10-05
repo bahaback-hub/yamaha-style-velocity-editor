@@ -38,12 +38,25 @@ Two things the table tells you honestly rather than hiding:
   different variations (`Clavi` in most of a style, `Pad` in its ending). Those
   columns are marked, because "which part is this" stops having one answer.
 
-### What the map is honest about
+### What plays when
 
-The file records **which parts play in each variation**. It does **not** record
-**which note belongs to which variation** — these exports flatten the performance
-into one timeline. So this tool does not claim to know, and the per-variation note
-work is a separate feature that says when it is guessing.
+The variation map says **which parts play in each variation**. The **markers** in the
+file say **when each one starts** — Yamaha styles carry an `FF 06` marker event at the
+top of every variation, so the boundaries are read, not guessed:
+
+- **What plays when** lays the form out as one bar per variation, sized by where the
+  file says it starts and ends, in the order the style actually plays them.
+- Each row is ticked when the parts that sounded during it match what the map
+  declares, and says so when one does not. A setup section like `SInt` appears
+  without being declared in the map, which is a real difference rather than an error.
+- **Lift one note** then changes the velocity of every occurrence of a single note,
+  either across the whole style or in the one variation you select. The count of
+  occurrences it will touch is written out before you press the button.
+
+This was wrong earlier. The tool used to claim that note-to-variation attribution was
+impossible because styles "flatten the performance into one timeline" — but the
+timeline is flattened, and the markers still sit on it saying where each variation
+begins. Both are now used.
 
 ---
 
@@ -166,20 +179,40 @@ come back unchanged.
 If that test ever fails, no length edit should be trusted. It is the thing that
 makes the rest safe rather than hopeful.
 
-### Sections are declared, not recoverable in time
+### Two places the form is recorded, and both are authoritative
 
-`CASM` lists the section names the original style advertises — `Main A`,
-`Main B`, `Intro A`, `Ending A` and so on — and, per variation, which parts sound.
-That much is authoritative, and it is what the variation map shows.
+`CASM` lists the section names the original style advertises — `Main A`, `Main B`,
+`Intro A`, `Ending A` and so on — and, per variation, which parts sound. That is what
+the variation map shows.
 
-What it does **not** record is where those variations start in time, because
-these exports flatten the performance into one timeline. So the notes cannot be
-split per variation from the file alone. The map is exact; anything that needs to
-know which note belongs to which variation has to infer it, and must say so when
-it is unsure.
+The boundaries in **time** come from the marker events (`FF 06`) in the performance
+track, one per variation, at the tick where it begins. `CASM` does not carry them, and
+the two are independent: a section can be declared without a marker, and a marker can
+name something the map never declares (`SInt`, the setup section, is the usual one).
+**What plays when** puts the two side by side and marks any that disagree rather than
+quietly picking one.
+
+Anything before the first marker or after the last one is reported as a prologue or
+epilogue rather than being folded into a neighbour, because both are real regions of
+the file.
 
 `Bridge` appears in the declared list only if the style declares one; most of
 this collection does not.
+
+### Reading `CASM` rather than recognising it
+
+The `CSEG` structure is read from the documented layout rather than by spotting byte
+patterns, and the read is checked against every style in the test collection:
+
+- each `CSEG` holds an `Sdec` header followed by one 55-byte `Ctb2` record per part;
+- all **202** styles in the collection re-serialise byte-identically, covering **6977**
+  part records, every one 47 bytes of body;
+- all **202** carry markers, and the **1563** variation spans they produce match their
+  declared maps.
+
+The byte pattern approach was not reliable — a parser built on it happened to agree
+with real files on the first few and disagreed further in, which is the worst way to
+be wrong.
 
 ### The map's record layout, and why it is safe to write
 
@@ -289,20 +322,28 @@ downloaded file back and ask the parser what actually changed:
   has to reach the file, a length edit has to resize the right track without
   losing the other, and a map toggle has to grow the file by exactly one 55-byte
   record while leaving every note byte alone. Toggling a dot back must restore the
-  original file byte for byte.
+  original file byte for byte. Also reads the two marked variations back out of the
+  form, in the order the file plays them.
+- `test/lift.e2e.mjs` — lifting one note's velocity: a fixture built so the same
+  note repeats through two marked variations at two different volumes, so "every
+  occurrence" and "this variation only" have different, checkable answers. Asserts
+  the downloaded file, not just what the page claims.
 - `test/real.e2e.mjs` — the reference export, end to end: 4592 notes, twelve
   channels. Asserts that a one-note edit changes exactly one byte, and that the
   saved result still re-emits byte-for-byte. Skips itself if the file is not
   present.
 
+`npm run test:browser` runs every one of them, all the way through, even after one
+fails. It used to chain with `&&`, which meant the first failure stopped the run and
+hid whatever was broken after it — that is how a set of bulk operations sat silently
+disabled while a shorter suite still reported a pass.
+
 ## Limitations — please read
 
-- **The variation map is exact; note-to-variation attribution is not.** The file
-  records which parts play in each variation, and the map is exact. It does not
-  record which note belongs to which variation, so anything that needs that has to
-  infer it from where the sounding parts change — and several variations often
-  share an identical part layout, which makes the inference ambiguous. Treat the
-  map as authoritative and per-variation note work as a guide.
+- **The boundaries are the file's own.** Variation boundaries come from the marker
+  events, so they are exact rather than inferred, and the map is authoritative
+  separately. Where the two disagree, **What plays when** says which and does not
+  pick a winner.
 - **Untested on hardware.** Nothing here has been loaded into a PSR-A5000. The
   byte-level work is proven against the file format, but whether the instrument
   honours an edited `CASM` has to be confirmed by ear. Start with a small change:

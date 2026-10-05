@@ -268,6 +268,78 @@ output { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 15
   .map-actions { flex-direction: column; }
 }
 
+/* ---- what plays when -------------------------------------------------------
+   One row per variation, with a strip showing where it sits in the whole
+   performance. The strip is the point: a list of names says what the style
+   contains, and the strip says where it actually happens. */
+
+.vars { display: grid; gap: 2px; }
+
+.var-row {
+  display: grid;
+  grid-template-columns: minmax(104px, 150px) 1fr 22px;
+  align-items: center; gap: 10px;
+  padding: 3px 4px; border-radius: 5px;
+}
+.var-row:hover { background: var(--surface-2); }
+.var-row.sel { background: var(--surface-3); box-shadow: inset 2px 0 0 var(--accent); }
+
+.var-name {
+  background: transparent; border: 0; color: var(--text); font: inherit;
+  font-size: 13px; text-align: left; padding: 3px 4px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.var-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.var-bar { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; min-width: 0; }
+.var-track {
+  position: relative; height: 12px; border-radius: 3px;
+  background: var(--line-soft); overflow: hidden;
+}
+.var-fill {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--accent); opacity: 0.75; border-radius: 3px;
+}
+.var-fill[data-match="silent"] { background: var(--dim); }
+.var-fill[data-match="undeclared"] { background: var(--muted); opacity: 0.5; }
+.var-fill[data-match="partial"] { background: var(--warn); }
+.var-facts {
+  font-size: 11px; color: var(--dim); white-space: nowrap;
+  font-variant-numeric: tabular-nums; min-width: 62px; text-align: right;
+}
+.var-match { font-size: 12px; text-align: center; color: var(--ok); }
+.var-match[data-match="partial"],
+.var-match[data-match="silent"],
+.var-match[data-match="undeclared"] { color: var(--warn); }
+
+/* ---- lift one note --------------------------------------------------------
+   Its own control rather than a selection plus a slider, because the job is small
+   and repeated: the same note, in every bar, moved by a fixed amount. */
+
+.lift { display: grid; gap: 10px; }
+
+.lift-row {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px;
+  padding: 10px; background: var(--surface-2);
+  border: 1px solid var(--line-soft); border-radius: 8px;
+}
+.lift-field { display: grid; gap: 4px; font-size: 11px; color: var(--dim); }
+.lift-field > span { text-transform: uppercase; letter-spacing: 0.06em; }
+.lift-select {
+  background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px;
+  min-width: 150px;
+}
+.lift-number {
+  background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px;
+  font-variant-numeric: tabular-nums; width: 74px;
+}
+.lift-number:focus, .lift-select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lift-buttons { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.lift-summary { margin: 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
 .voice.active { box-shadow: inset 2px 0 0 var(--accent); }
 .voice.active .voice-name span::after {
   content: "editing"; margin-left: 8px; font-size: 10px; font-weight: 500;

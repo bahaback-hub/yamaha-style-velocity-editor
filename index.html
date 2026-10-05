@@ -50,6 +50,30 @@
       <div class="summary" id="mapSummary"></div>
     </div>
 
+    <!-- What plays when, read from the file's markers -->
+    <div class="block" id="blockVariations">
+      <div class="block-head">
+        <h2>What plays when</h2>
+        <span class="hint" id="variationsHint"></span>
+      </div>
+      <p class="hint map-legend">
+        Each bar below is one variation, positioned and sized by where the file
+        says it starts and ends. A tick means the parts that sounded during it
+        match what the map declares.
+      </p>
+      <div class="vars" id="vars"></div>
+      <div class="summary" id="variationsSummary"></div>
+    </div>
+
+    <!-- Lift one note's velocity everywhere -->
+    <div class="block">
+      <div class="block-head">
+        <h2>Lift one note</h2>
+        <span class="hint">Change every occurrence of one note, in one step</span>
+      </div>
+      <div class="lift" id="lift"></div>
+    </div>
+
     <!-- Transport -->
     <div class="transport" role="group" aria-label="Playback">
       <button class="btn btn-play" id="btnPlay" aria-label="Play">Play</button>

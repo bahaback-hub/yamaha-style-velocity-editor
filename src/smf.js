@@ -104,6 +104,14 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
   const view = new DataView(buffer);
   /** @type {NoteHit[]} */
   const notes = [];
+  /**
+   * Marker and cue events, in the order they appear. These carry the variation
+   * boundaries, so they are collected as first-class data rather than left inside
+   * the opaque event bytes. Declared before `empty` because a track that carries
+   * markers but no readable notes still has to hand them back.
+   * @type {{tick: number, name: string, kind: 'marker'|'cue'}[]}
+   */
+  const markers = [];
   const limit = payloadOffset + payloadSize;
   const empty = (error) => ({
     notes,
@@ -113,6 +121,8 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
     tempoMap: [],
     timeSignature: { numerator: 4, denominator: 4 },
     lengthTicks: 0,
+    markers,
+    sectionSpans: buildSectionSpans(markers, 0, null),
     error,
   });
 
@@ -138,13 +148,6 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
   /** Raw events per track, so a track can be re-emitted byte-for-byte. */
   /** @type {{events: TrackEvent[], trackIndex: number, start: number, length: number}[]} */
   const trackList = [];
-  /**
-   * Marker and cue events, in the order they appear. These carry the variation
-   * boundaries, so they are collected as first-class data rather than left inside
-   * the opaque event bytes.
-   * @type {{tick: number, name: string, kind: 'marker'|'cue'}[]}
-   */
-  const markers = [];
   /** @type {number|null} */
   let endOfTrackTick = null;
 

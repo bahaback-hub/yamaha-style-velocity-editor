@@ -60,16 +60,27 @@ function concat(parts) {
 const T = [];
 T.push(0x00, 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08);       // 4/4
 T.push(0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20);             // 120 BPM
-for (let beat = 0; beat < 16; beat++) {
+// A marker names the variation that starts here, which is how a real style records
+// where each one begins. The bass stops after eight beats, so the second half is a
+// different variation rather than the first one continuing.
+const marker = (name) => [0x00, 0xff, 0x06, name.length, ...[...name].map((c) => c.charCodeAt(0))];
+T.push(...marker('Main A'));
+for (let beat = 0; beat < 8; beat++) {
   T.push(0x00, 0x99, 36, 100);                                 // kick on the beat
   T.push(0x83, 0x60, 0x89, 36, 0);                             // ...one quarter later
   T.push(0x00, 0x99, 42, 70);                                  // hat on the beat
   T.push(0x00, 0x89, 42, 0);
-  if (beat < 8) {
-    T.push(0x00, 0x9b, 40, 90);
-    T.push(0x83, 0x60, 0x8b, 40, 0);
-  }
+  T.push(0x00, 0x9b, 40, 90);                                  // bass, first half only
+  T.push(0x83, 0x60, 0x8b, 40, 0);
 }
+T.push(...marker('Main B'));
+for (let beat = 8; beat < 16; beat++) {
+  T.push(0x00, 0x99, 36, 100);
+  T.push(0x83, 0x60, 0x89, 36, 0);
+  T.push(0x00, 0x99, 42, 70);
+  T.push(0x00, 0x89, 42, 0);
+}
+T.push(0x00, 0xff, 0x2f, 0x00);                                // end of track
 const smf = concat([mthd(480, 1), track(T)]);
 
 // CASM with two CSEG groups: Main A with both parts, Main B with the bass only.
@@ -182,8 +193,24 @@ check('timeline renders one lane per part', lanes === 2, String(lanes));
 const cells = await page.locator('.tl-cell').count();
 check('timeline has one cell per bar per part', cells === bars * lanes, `${cells} cells for ${bars} bars x ${lanes} lanes`);
 const blockCount = await page.locator('.tl-block').count();
-check('a block boundary is detected where a part stops', blockCount >= 2, String(blockCount));
-check('block detection is labelled as inferred', /inferred/i.test(await page.locator('#timelineHint').textContent()));
+// The ruler is read from the file's markers, not inferred from where the parts
+// change - the fixture now marks Main A and Main B explicitly.
+const ruler = await page.locator('.tl-block').allTextContents();
+check('the ruler is read from the file\'s markers', ruler.some((t) => /Main/.test(t)), ruler.join(' | '));
+check('the timeline says where the boundaries came from',
+  /marker/i.test(await page.locator('#timelineHint').textContent()),
+  await page.locator('#timelineHint').textContent());
+
+// The variation list is the same information, with the length of each variation
+// and a check against the map.
+const varRows = await page.locator('.var-row').count();
+check('both marked variations are listed', varRows === 2, String(varRows));
+const varNames = await page.locator('.var-name').allTextContents();
+check('in the order the style plays them',
+  varNames.join(',') === 'Main A,Main B', varNames.join(','));
+check('each variation agrees with the map',
+  await page.locator('.var-match[data-match="exact"]').count() === 2,
+  await page.locator('#variationsSummary').textContent());
 
 // Declared sections
 const decl = await page.locator('.decl-tag').allTextContents();

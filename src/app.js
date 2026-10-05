@@ -35,6 +35,9 @@ import {
   parseCasm, writeCasm, casmWithEdits, styleParts, applyCasmOperations,
 } from './cseg.js';
 import { MapView, describeMap } from './map-view.js';
+import { VariationView } from './variation-view.js';
+import { buildVariations } from './variations.js';
+import { NoteLift } from './note-lift.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -53,6 +56,8 @@ const el = {
   status: $('status'),
   map: $('map'), mapHint: $('mapHint'), mapSummary: $('mapSummary'),
   blockMap: $('blockMap'), btnCopyMap: $('btnCopyMap'), saveHint: $('saveHint'),
+  vars: $('vars'), variationsHint: $('variationsHint'), variationsSummary: $('variationsSummary'),
+  blockVariations: $('blockVariations'), lift: $('lift'),
 
   partSelect: $('partSelect'), snap: $('snap'), followPlay: $('followPlay'),
   btnFit: $('btnFit'), btnRevert: $('btnRevert'), editCount: $('editCount'),
@@ -102,6 +107,10 @@ let roll = null;
 let lane = null;
 /** @type {MapView|null} */
 let mapView = null;
+/** @type {VariationView|null} */
+let variationView = null;
+/** @type {NoteLift|null} */
+let noteLift = null;
 let rafId = null;
 
 function say(message, kind = '') {
@@ -210,10 +219,20 @@ function parseAll(buffer) {
   let timeSignature = { numerator: 4, denominator: 4 };
   let division = 0;
   let lengthTicks = 0;
+  // The markers live in the performance track. Whichever payload carries them
+  // describes the whole style's variation order, so the first set found is used.
+  // A track that holds markers but no notes still counts - it is read before the
+  // note check bails out, otherwise its boundaries are silently dropped.
+  let spans = [];
+  let foundMarkers = false;
 
   for (let i = 0; i < info.payloads.length; i++) {
     const p = info.payloads[i];
     let r = indexNotes(buffer, p.offset, p.size);
+    if (!foundMarkers && r.sectionSpans?.some((s) => s.markerIndex !== null)) {
+      spans = r.sectionSpans;
+      foundMarkers = true;
+    }
     if (r.error) {
       const alt = indexTracksOnly(buffer, p.offset, p.size);
       if (alt.notes.length > 0) r = alt;
@@ -241,7 +260,7 @@ function parseAll(buffer) {
   if (!tempoMap) tempoMap = [{ tick: 0, usPerQuarter: 500000 }];
   // The last note-on can sit past the final meta event's tick.
   lengthTicks = Math.max(lengthTicks, ...notes.map((n) => n.at));
-  return { info, notes, payloads, parsedByPayload, tempoMap, timeSignature, division, lengthTicks };
+  return { info, notes, payloads, parsedByPayload, tempoMap, timeSignature, division, lengthTicks, spans };
 }
 
 async function loadFile(file) {
@@ -250,7 +269,7 @@ async function loadFile(file) {
     say('Reading\u2026');
     const buffer = await file.arrayBuffer();
     const parsed = parseAll(buffer);
-    const { info, notes, payloads, parsedByPayload, tempoMap, timeSignature, division, lengthTicks } = parsed;
+    const { info, notes, payloads, parsedByPayload, tempoMap, timeSignature, division, lengthTicks, spans } = parsed;
 
     // Structure: CASM names the parts and declares the original sections.
     const structure = readStyleStructure(buffer);
@@ -269,6 +288,14 @@ async function loadFile(file) {
     const meter = resolveMeter(timeSignature, lengthTicks, division);
     const tpb = meter.ticksPerBar;
 
+    // Variations, from the markers, joined with the declared map. Built once here
+    // because it is a pass over every note; every render reads the result.
+    const variations = buildVariations(
+      { sectionSpans: spans, notes, lengthTicks, division, tempoMap },
+      parseCasm(buffer),
+      { ticksPerBar: tpb },
+    );
+
     // Row per channel that has notes, in channel order.
     const rows = [...stats.values()].sort((a, b) => a.channel - b.channel);
     for (const r of rows) {
@@ -285,12 +312,16 @@ async function loadFile(file) {
       name: file.name, buffer, version: info.version, container: info.container,
       notes, payloads, parsedByPayload, structure, stats, rows,
       tempoMap, timeSignature, lengthTicks, meter, tpb, division,
+      spans, variations,
       blocks: detectBlocks(notes, meter, tpb, (t) => tickToSeconds(tempoMap, t, division)),
       presence: presencePerBar(notes, meter, tpb),
       selected: new Set(rows.map((r) => r.channel)),
       activeChannel: rows.length ? rows[0].channel : -1,
       pendingVelocity: new Map(),
       pendingShape: new Map(),
+      // Which variation the note tools are aimed at, and how wide "here" is.
+      variationIndex: 0,
+      liftScope: 'all',
       // Section-map edits, as intentions replayed onto a fresh parse. See the note
       // on casmWithEdits: the CASM offset moves when a note edit changes the length
       // of the track in front of it.
@@ -311,6 +342,8 @@ async function loadFile(file) {
 
     mountCanvases();
     mountMap();
+    mountVariations();
+    mountLift();
     renderMeta();
     renderPartSelect();
     renderTimeline();
@@ -375,6 +408,104 @@ function mountMap() {
     onClone: (after) => stageCasm({ op: 'clone', after }),
   });
   renderMap();
+}
+
+// ---- what plays when --------------------------------------------------------
+
+/**
+ * The variations, joined from the two halves of the file.
+ *
+ * The declared map says which parts each variation may use; the markers say when it
+ * happens. Building both and comparing them is what turns "the file says Main D
+ * uses Pad" into "and here is Main D, six bars long, with Pad sounding throughout".
+ */
+function currentVariations() {
+  if (!state) return [];
+  const casm = parseCasm(state.buffer);
+  const spans = state.spans ?? [];
+  if (!spans.length) return [];
+  // buildVariations wants the same shape indexNotes returns.
+  return buildVariations(
+    { sectionSpans: spans, notes: state.notes, lengthTicks: state.lengthTicks },
+    casm,
+    { ticksPerBar: state.tpb },
+  );
+}
+
+function renderVariations() {
+  if (!state || !variationView) return;
+  const variations = state.variations ?? [];
+  if (!variations.length) {
+    el.blockVariations.classList.add('hidden');
+    return;
+  }
+  el.blockVariations.classList.remove('hidden');
+  variationView.selected = state.variationIndex;
+  variationView.render(variations, { ticksPerBar: state.tpb });
+
+  const bars = variations.reduce((a, v) => a + v.bars, 0);
+  el.variationsHint.textContent = `${variations.length} occurrence${variations.length === 1 ? '' : 's'}`
+    + ` \u00b7 ${bars} bars \u00b7 in the order the style plays them`;
+  const mismatched = variations.filter((v) => v.match === 'partial');
+  const undeclared = variations.filter((v) => v.match === 'undeclared');
+  const silent = variations.filter((v) => v.match === 'silent');
+  const bits = [];
+  if (undeclared.length) {
+    bits.push(`${undeclared.length} variation${undeclared.length === 1 ? '' : 's'} not declared in the map (${undeclared.map((v) => v.name).join(', ')})`);
+  }
+  if (silent.length) {
+    bits.push(`${silent.length} declared but silent here (${silent.map((v) => v.name).join(', ')})`);
+  }
+  if (mismatched.length) {
+    bits.push(`${mismatched.length} where a declared part did not sound: `
+      + mismatched.map((v) => `${v.name} (${v.missing.map((c) => `ch${c + 1}`).join(', ')})`).join('; '));
+  }
+  el.variationsSummary.innerHTML = bits.length
+    ? `<b>Worth knowing:</b> ${esc(bits.join('. '))}.`
+    : 'Every variation matches what the map declares.';
+}
+
+function mountVariations() {
+  variationView = new VariationView(el.vars, {
+    onSelect: (index) => {
+      state.variationIndex = index;
+      renderVariations();
+      renderLift();
+    },
+  });
+  renderVariations();
+}
+
+// ---- lifting one note -------------------------------------------------------
+
+function mountLift() {
+  noteLift = new NoteLift(el.lift, {
+    parts: () => state.rows.map((r) => ({ channel: r.channel, label: r.label })),
+    notes: () => state.notes,
+    variations: () => state.variations ?? [],
+    variationIndex: () => state.variationIndex,
+    scope: () => state.liftScope,
+    setScope: (value) => { state.liftScope = value; renderLift(); },
+    ticksPerBar: () => state.tpb,
+    current: (note) => effective(note).velocity,
+    apply: (targets) => {
+      for (const { note, velocity } of targets) stageEdit(note, { velocity });
+      afterEdit();
+      // The summary reads the notes through `effective`, so it has to be rebuilt
+      // after the edits or it keeps describing the state before them.
+      renderLift();
+    },
+  });
+  renderLift();
+}
+
+function renderLift() {
+  if (!state || !noteLift) return;
+  noteLift.render({
+    parts: state.rows.map((r) => ({ channel: r.channel, label: r.label })),
+    notes: state.notes,
+    variations: state.variations ?? [],
+  });
 }
 
 function draw() {
@@ -528,6 +659,29 @@ function renderMap() {
   if (state.casmError) {
     el.mapSummary.innerHTML += `<br><b>Could not apply a change:</b> ${esc(state.casmError)}`;
   }
+  // A map change alters what the variations are declared to contain, so the
+  // variation list has to be rebuilt or its check marks would go stale.
+  refreshVariations();
+}
+
+/**
+ * Rebuild the variation list from the current map, keeping the selection.
+ *
+ * Rebuilding rather than patching matters: a deletion renumbers everything after
+ * it, so an index held from before the edit would point at a different variation.
+ */
+function refreshVariations() {
+  if (!state) return;
+  const before = state.variations?.[state.variationIndex]?.name ?? null;
+  state.variations = currentVariations();
+  if (before) {
+    const same = state.variations.findIndex((v) => v.name === before);
+    if (same >= 0) state.variationIndex = same;
+  }
+  if (state.variationIndex >= state.variations.length) {
+    state.variationIndex = Math.max(0, state.variations.length - 1);
+  }
+  renderVariations();
 }
 
 /** Stage a map operation, then redraw. Nothing is written until download. */
@@ -601,19 +755,23 @@ function renderTimeline() {
   ruler.append(Object.assign(document.createElement('div'), { className: 'tl-name' }));
   const blockWrap = document.createElement('div');
   blockWrap.className = 'tl-blocks';
-  for (const b of s.blocks) {
+  // The variation ruler comes from the file's markers. It used to be inferred from
+  // where the sounding parts changed, which invented boundaries where a variation
+  // held steady and missed repeats of a layout another variation already used.
+  const marked = state.variations ?? [];
+  for (const v of marked) {
     const d = document.createElement('div');
     d.className = 'tl-block';
-    d.style.flex = String(Math.max(1, b.endBar - b.startBar));
-    d.textContent = b.endBar - b.startBar >= 3 ? b.label : '';
-    d.title = `${b.label}: bars ${b.startBar + 1}\u2013${b.endBar}, ${b.channels.length} part(s)`;
+    d.style.flex = String(Math.max(1, v.bars));
+    d.textContent = v.bars >= 3 ? v.name : '';
+    d.title = `${v.name}: ${v.bars} bar(s), ${v.notes} note(s)`;
     blockWrap.append(d);
   }
-  if (s.blocks.length === 0) {
+  if (marked.length === 0) {
     const d = document.createElement('div');
     d.className = 'tl-block';
     d.style.flex = '1';
-    d.textContent = 'no notes';
+    d.textContent = state.notes.length ? 'no variation markers' : 'no notes';
     blockWrap.append(d);
   }
   ruler.append(blockWrap);
@@ -647,9 +805,11 @@ function renderTimeline() {
     el.timeline.append(row);
   }
 
-  const inferred = s.blocks.every((b) => b.source === BLOCK_SOURCE.inferred) && s.blocks.length > 0;
+  const inferred = false;
   const notes = [
-    inferred ? 'Blocks are inferred from where the sounding parts change - the file stores no section boundaries.' : '',
+    s.variations?.length
+      ? `${s.variations.length} variations, read from the file's markers.`
+      : 'This file carries no variation markers, so the blocks above are inferred from where the parts change.',
     s.meter.source === BLOCK_SOURCE.inferred && s.meter.note ? `Grid uses 4/4: ${s.meter.note}.` : '',
   ].filter(Boolean).join(' ');
   el.timelineHint.textContent = notes || `${bars} bars`;
@@ -1336,4 +1496,7 @@ window.__editor = {
   width: () => roll?.cssWidth ?? 0,
 };
 
+// The pitch range the bulk operations work over. Without this the two selects are
+// empty, Number('') is 0, and every range collapses to "pitch 0 only" - so the bulk
+// operations silently have nothing to act on.
 fillNotes();

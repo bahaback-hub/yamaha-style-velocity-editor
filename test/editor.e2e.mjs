@@ -55,6 +55,15 @@ const name8 = (s) => Uint8Array.from([...s.padEnd(8, ' ')].map((c) => c.charCode
 // A quarter note is 480 ticks, which is the two-byte delta 0x83 0x60.
 const Q = [0x83, 0x60];
 
+// Variable-length quantity, for a gap of any length. Every delta is followed by
+// its own event, so a gap belongs to the event that comes after it.
+function ticks(n) {
+  const out = [n & 0x7f];
+  n >>= 7;
+  while (n > 0) { out.unshift((n & 0x7f) | 0x80); n >>= 7; }
+  return out;
+}
+
 const drums = [];
 for (const [pitch, velocity] of [[36, 100], [38, 70], [42, 90], [46, 60]]) {
   drums.push(0x00, 0x99, pitch, velocity, ...Q, 0x89, pitch, 0);
@@ -64,9 +73,17 @@ for (const [pitch, velocity] of [[40, 80], [43, 110]]) {
   bass.push(0x00, 0x9b, pitch, velocity, ...Q, 0x8b, pitch, 0);
 }
 
+// A marker names the variation that starts here, which is how a real style records
+// where each one begins. They go in the conductor track, as they do in a real file,
+// and sit so that each covers half the drums without moving a single note.
+const markerAt = (gap, name) => [
+  ...ticks(gap), 0xff, 0x06, name.length, ...[...name].map((c) => c.charCodeAt(0)),
+];
+
 const smf = concat([
   mthd(480, 2),
-  track([0x00, 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08, 0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20]),
+  track([0x00, 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08, 0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20,
+    ...markerAt(0, 'Main A'), ...markerAt(480 * 2, 'Main B')]),
   track(drums),
   track(bass),
 ]);
@@ -531,6 +548,25 @@ await dlNoop.saveAs(join(OUT, 'map-noop.sty'));
 const noopMsg = await page.locator('#status').textContent();
 check('a download with nothing pending does not claim to have changed anything',
   /No changes to write|copy of the original/.test(noopMsg), noopMsg.slice(0, 80));
+
+// ---- what plays when ---------------------------------------------------------
+// The boundaries come from the file's markers, so the two halves are told apart by
+// what the file says rather than by guessing from where the parts change.
+
+check('the variations block is on the page', await page.locator('#blockVariations').isVisible());
+check('one row per marked variation', await page.locator('.var-row').count() === 2,
+  `${await page.locator('.var-row').count()} rows`);
+check('the marked names are shown in the order they play',
+  (await page.locator('.var-name').allTextContents()).join(',') === 'Main A,Main B',
+  (await page.locator('.var-name').allTextContents()).join(','));
+check('each one agrees with what the map declares',
+  await page.locator('.var-match[data-match="exact"]').count() === 2,
+  await page.locator('#variationsSummary').textContent());
+
+// The form has to place them in time, not just list them.
+const mainB = await page.locator('.var-row').nth(1).locator('.var-fill').getAttribute('style');
+check('Main B is placed later in the form than Main A',
+  Number(mainB.match(/left:\s*([\d.]+)%/)?.[1] ?? 0) > 0, mainB);
 
 check('no JS errors at the end', errors.length === 0, errors.slice(0, 3).join(' | '));
 
