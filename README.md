@@ -220,16 +220,33 @@ patterns, and the read is checked against every style in the test collection:
 
 The byte pattern approach was not reliable — a parser built on it happened to agree
 with real files on the first few and disagreed further in, which is the worst way to
-be wrong.
+be wrong. And a byte-identical round trip only proves the framing, never the field
+offsets: a reader that kept every declared length and every unknown entry still
+re-emits a file it has misread. That is why the tests above build records this
+collection does not contain.
 
 ### The map's record layout, and why it is safe to write
 
-Each part inside a variation is a **55-byte** record: a 7-byte `Ctb2` tag, the
-`0x2F` marker, the channel number, an 8-byte padded part name, and 38 parameter
-bytes that begin with the channel number again. The arithmetic checks out on real
-files — a `Main A` with six parts is `14 + 6 * 55 = 344` bytes, a `Main B` with
-five is `14 + 5 * 55 = 289`, and `Intro A` at 125 is a seven-character name plus
+Each part inside a variation is a **55-byte** record in the styles here: a 7-byte
+`Ctb2` tag, the `0x2F` marker, the channel number, an 8-byte padded part name, and 38
+parameter bytes that begin with the channel number again. The arithmetic checks out
+on real files — a `Main A` with six parts is `14 + 6 * 55 = 344` bytes, a `Main B`
+with five is `14 + 5 * 55 = 289`, and `Intro A` at 125 is a seven-character name plus
 two records.
+
+**The record length is read from the file, not assumed to be 47.** All 6,977 records
+in this collection declare exactly 47, but Yamaha's own Style Creator shows
+parameter offsets on its Channel Edit screen of at least 94 — so a longer record is
+possible, and one this tool has never seen. Any bytes past the named fields are kept
+and written back untouched, because writing 47 bytes into a record that held 96
+would silently discard 49 bytes of part settings on every save — and nothing in the
+map would say so.
+
+**Entries inside a section that this reader does not decode are kept too**, not just
+stepped over. A section is rebuilt from the pieces that were understood, so an entry
+that is only skipped while reading would be gone after the first save. A section that
+claims more bytes than it holds is reported on load instead of being quietly
+shortened.
 
 Those 38 parameter bytes are not decoded. They describe the voice rather than the
 map, and they are carried through verbatim in both directions, so an edit to the

@@ -324,6 +324,14 @@ async function loadFile(file) {
     const structure = readStyleStructure(buffer);
     const stats = summariseByChannel(notes);
 
+    // Anything the map reader could not make sense of is said out loud on load.
+    // These bytes are kept rather than dropped, so a save does not damage the file -
+    // but a player who is told nothing has no way to know the map is not complete,
+    // and would not think to look for the difference.
+    const casmForWarnings = parseCasm(buffer);
+    const mapWarnings = (casmForWarnings?.sections ?? [])
+      .flatMap((s) => (s.warnings ?? []).map((w) => `${s.name || 'a variation'}: ${w}`));
+
     // Which channel carries which voice name. A channel can appear under more
     // than one name across section groups; prefer the first, but keep a list.
     /** @type {Map<number, string[]>} */
@@ -408,6 +416,8 @@ async function loadFile(file) {
     const skipped = payloads.filter((p) => !p.ok);
     if (skipped.length) {
       say(`Loaded, but ${skipped.map((p) => p.kind).join(' and ')} could not be read, so the edit will only reach ${payloads.filter((p) => p.ok).map((p) => p.kind).join(' and ')}. Newer arrangers may play the untouched copy.`, 'warn');
+    } else if (mapWarnings.length) {
+      say(`Loaded ${notes.length} notes. The variation map is not completely readable: ${mapWarnings.join('; ')}. Those bytes are kept as they are, but the map shown here may be incomplete.`, 'warn');
     } else {
       say(`Loaded ${notes.length} notes. Pick a part, then drag in the velocity lane or the roll.`, 'ok');
     }

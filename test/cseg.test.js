@@ -50,7 +50,18 @@ const name8 = (s) => Uint8Array.from([...s.padEnd(8, ' ')].map((c) => c.charCode
 
 /** A part entry in the documented shape: Ctb2, length 47, then the body. */
 function part(channel, partName, patch = {}) {
-  const body = new Uint8Array(CTB2_BODY);
+  return partOfLength(CTB2_BODY, channel, partName, patch);
+}
+
+/**
+ * A `Ctb2` of any body length.
+ *
+ * Every style in this collection declares 47. The instrument's own Channel Edit
+ * screen shows parameter offsets up to at least 94, so a longer record is at least
+ * possible, and a rewrite must not shorten one.
+ */
+function partOfLength(bodyLength, channel, partName, patch = {}, fill = 0) {
+  const body = new Uint8Array(bodyLength).fill(fill);
   body[0] = channel;
   body.set(name8(partName), 1, 8);
   body[9] = channel;                       // destination channel
@@ -84,6 +95,11 @@ function section(sectionName, parts) {
   let p = 8 + text.length;
   for (const part of parts) { body.set(part, p); p += part.length; }
   return chunk('CSEG', body);
+}
+
+/** A section with extra entries after its parts, and with those bytes reachable. */
+function sectionWithExtras(sectionName, parts, extras) {
+  return section(sectionName, [...parts, ...extras]);
 }
 
 /** A bare-MIDI style: header, one track, then CASM as a sibling chunk. */
@@ -167,6 +183,93 @@ test('an entry type this reader does not know is stepped over, not misread', () 
   const casm = parseCasm(buffer);
   assert.deepEqual(casm.sections[0].parts.map((r) => r.name), ['Drums', 'Bass']);
   assert.ok(casm.entryTypes.includes('Cntt'), 'and it is reported as seen');
+});
+
+// ---- things a rewrite must not lose -----------------------------------------
+// Each of these was a way a save could quietly damage a style. None of them shows
+// up in the map, and none shows up in a byte-identical round trip of the collection,
+// because every file in the collection happens to have none of them.
+
+test('an unknown entry survives a rewrite, byte for byte', () => {
+  // Reading it is not enough. A section is rebuilt from the parts that were
+  // understood, so an entry that is only stepped over during reading is gone after
+  // the first save - and the part sounds different on the instrument with nothing
+  // in the map to explain it.
+  const cntt = chunk('Cntt', new Uint8Array(12).fill(0xab));
+  const ctab = chunk('Ctab', new Uint8Array(5).fill(0x5c));
+  const buffer = styleWith([sectionWithExtras('Main A', [part(9, 'Drums')], [cntt, ctab])]);
+
+  const casm = parseCasm(buffer);
+  assert.equal(casm.sections[0].extras.length, 2, 'both are kept, not just noticed');
+
+  const out = writeCasm(buffer, casm);
+  assert.ok(Buffer.from(out).includes(Buffer.from(cntt)), 'the Cntt is still in the file');
+  assert.ok(Buffer.from(out).includes(Buffer.from(ctab)), 'and so is the Ctab');
+});
+
+test('an unknown entry survives a real map edit', () => {
+  const cntt = chunk('Cntt', new Uint8Array(12).fill(0xab));
+  const buffer = styleWith([sectionWithExtras('Main A', [part(9, 'Drums')], [cntt])]);
+  // Switch the part off and back on, which rewrites every section.
+  const off = writeCasm(buffer, casmWithEdits(buffer, [
+    { op: 'channel', section: 'Main A', channel: 9, on: false },
+  ]).casm);
+  assert.ok(Buffer.from(off).includes(Buffer.from(cntt)),
+    'the unknown entry survives switching a part off');
+});
+
+test('a part body longer than 47 keeps its length and its tail', () => {
+  // The instrument's Channel Edit screen shows parameter offsets up to at least 94,
+  // so a longer record is possible. Writing 47 bytes into one that held more would
+  // drop 49 bytes of parameters on every save.
+  const long = partOfLength(96, 9, 'Drums', {}, 0xee);
+  const buffer = styleWith([section('Main A', [long])]);
+
+  const casm = parseCasm(buffer);
+  const entry = casm.sections[0].parts[0];
+  assert.equal(entry.bodyLength, 96, 'the length comes from the file, not from a constant');
+  assert.equal(entry.extraLength, 49, 'and the extra bytes are accounted for');
+  assert.equal(entry.reserved.length, 56, 'the whole tail from byte 40 is kept');
+
+  const out = writeCasm(buffer, casm);
+  assert.equal(Buffer.compare(Buffer.from(out), Buffer.from(buffer)), 0,
+    'an untouched rewrite of a long record is byte-identical');
+});
+
+test('a long part body survives a field edit', () => {
+  // The byte-level check above could pass with the tail dropped if nothing changed.
+  // Changing a named field proves the named fields are written into the same record
+  // while the unnamed tail is still there.
+  const long = partOfLength(96, 9, 'Drums', {}, 0xee);
+  const buffer = styleWith([section('Main A', [long])]);
+  const out = writeCasm(buffer, casmWithEdits(buffer, [
+    { op: 'field', section: 'Main A', channel: 9, field: 'chordKey', value: 5 },
+  ]).casm);
+
+  const after = parseCasm(out);
+  const entry = after.sections[0].parts[0];
+  assert.equal(entry.chordKey, 5, 'the edit landed');
+  assert.equal(entry.bodyLength, 96, 'and the record is still 96 bytes');
+  assert.equal(entry.reserved.length, 56, 'with the whole tail still present');
+  assert.ok(entry.reserved.slice(7).every((b) => b === 0xee),
+    'and the tail bytes are the original ones, not zeroes');
+});
+
+test('a section that overruns its own length is reported, not silently shortened', () => {
+  // An entry claiming more bytes than the section holds. Stepping over the rest of
+  // it would drop the tail on every save; so it is kept and the problem is said out
+  // loud rather than hidden in a file that looks fine.
+  const overrun = chunk('Cntt', new Uint8Array(400).fill(0x11));
+  const short = section('Main A', [overrun, part(9, 'Drums')]);
+  // Shrink the CSEG's declared length so the Cntt runs past its end.
+  new DataView(short.buffer).setUint32(4, short.length - 8 - 200);
+  const buffer = styleWith([short]);
+
+  const casm = parseCasm(buffer);
+  assert.ok(casm.sections[0].warnings.length > 0,
+    `the overrun is reported: ${JSON.stringify(casm.sections[0].warnings)}`);
+  assert.match(casm.sections[0].warnings[0], /runs past the end/);
+  assert.ok(casm.sections[0].extras.length > 0, 'and the bytes inside the section are kept');
 });
 
 test('the channel number is the same one the notes use, with no shift', () => {

@@ -125,13 +125,18 @@ function u32(view, at) {
  * @property {RegisterRange} low
  * @property {RegisterRange} middle
  * @property {RegisterRange} high
- * @property {Uint8Array} reserved the last seven bytes, untouched
+ * @property {Uint8Array} reserved the bytes from 40 to the end of the body, untouched
+ * @property {number} bodyLength the length the file declares, which is not always 47
+ * @property {number} extraLength bodyLength - 47, the bytes this reader does not name
  *
  * @typedef {object} Section
  * @property {number} index
  * @property {string} name
  * @property {Uint8Array} nameBytes
  * @property {PartEntry[]} parts the Ctb2 entries, in file order
+ * @property {{magic: string, bytes: Uint8Array}[]} extras every entry in this
+ *   section that is not an Sdec or a Ctb2, kept verbatim so a rewrite can put it back
+ * @property {string[]} warnings what could not be read, rather than being dropped
  * @property {number[]} channels sorted, unique
  * @property {number} offset absolute offset of the CSEG chunk header
  * @property {number} length
@@ -212,15 +217,36 @@ function readCseg(bytes, view, csegOffset, csegLength, index, entryTypes) {
   let nameBytes = new Uint8Array(0);
   /** @type {PartEntry[]} */
   const parts = [];
+  /**
+   * Every entry that is not an Sdec or a Ctb2, kept exactly as it was.
+   *
+   * A section is rebuilt from the pieces that were understood, so anything not
+   * understood has to be carried across deliberately - otherwise a style that
+   * carries a `Ctab` or a `Cntt` loses it on the first save, and the loss is
+   * invisible until the instrument plays the part differently.
+   *
+   * @type {{magic: string, bytes: Uint8Array}[]}
+   */
+  const extras = [];
+  /** @type {string[]} */
+  const warnings = [];
 
   let p = bodyStart;
   while (p + 8 <= bodyEnd) {
     const magic = chunkId(bytes, p);
     const length = u32(view, p + 4);
-    if (length === 0) break;
     const dataStart = p + 8;
     const dataEnd = dataStart + length;
-    if (dataEnd > bodyEnd) break;
+    if (length === 0 || dataEnd > bodyEnd) {
+      // The section claims more than it holds, or holds an entry of no length.
+      // Stepping over the rest of it would drop the tail silently, so say so and
+      // keep whatever bytes are still inside the section.
+      warnings.push(
+        `entry "${magic}" at ${p} declares ${length} byte(s), which runs past the end of the section`,
+      );
+      if (p < bodyEnd) extras.push({ magic: '????', bytes: new Uint8Array(bytes.subarray(p, bodyEnd)) });
+      break;
+    }
     if (!entryTypes.includes(magic)) entryTypes.push(magic);
 
     if (magic === 'Sdec') {
@@ -228,10 +254,9 @@ function readCseg(bytes, view, csegOffset, csegLength, index, entryTypes) {
       name = cleanName(nameBytes);
     } else if (magic === 'Ctb2' && length >= CTB2_BODY) {
       parts.push(readCtb2(bytes, view, dataStart, dataEnd));
+    } else if (magic !== 'Sdec') {
+      extras.push({ magic, bytes: new Uint8Array(bytes.subarray(p, dataEnd)) });
     }
-    // Anything else - Ctab, Cntt, a type added after this was written - is stepped
-    // over using its own length and left alone. Its bytes stay in the file because
-    // the section is rebuilt from the pieces we understood, plus the lengths.
     p = dataEnd;
   }
 
@@ -240,6 +265,8 @@ function readCseg(bytes, view, csegOffset, csegLength, index, entryTypes) {
     name,
     nameBytes,
     parts,
+    extras,
+    warnings,
     channels: [...new Set(parts.map((r) => r.channel))].sort((a, b) => a - b),
     offset: csegOffset,
     length: csegLength,
@@ -268,12 +295,23 @@ function readRange(bytes, at) {
   };
 }
 
-/** Decode one part: the 47-byte `Ctb2` body. */
+/**
+ * Decode one part.
+ *
+ * Only the first 47 bytes are named here, because 47 is what every style in this
+ * collection uses and those are the fields the tool can offer an editor. The
+ * declared length is the file's, not this function's: a `Ctb2` that is longer than
+ * 47 carries parameters this reader has no name for - the instrument's own Channel
+ * Edit screen shows offsets up to at least 94 - and those bytes have to survive a
+ * rewrite untouched. So the tail is kept whole and `reserved` reaches to wherever
+ * the body actually ends.
+ */
 function readCtb2(bytes, view, start, end) {
   const body = bytes.subarray(start, end);
   const notePlayLow = body[11];
   const notePlayHigh = body[12];
   const mask = notePlayLow | (notePlayHigh << 8);
+  const bodyLength = end - start;
   /** @type {PartEntry} */
   const part = {
     kind: 'ctb2',
@@ -294,12 +332,14 @@ function readCtb2(bytes, view, start, end) {
     low: readRange(bytes, start + 22),
     middle: readRange(bytes, start + 28),
     high: readRange(bytes, start + 34),
-    reserved: body.slice(start === 0 ? 0 : 40, 47),
+    // From 40 to wherever the body ends - seven bytes in the collection's files,
+    // more in a file this reader has not seen.
+    reserved: new Uint8Array(bytes.subarray(start + 40, end)),
+    bodyLength,
+    extraLength: Math.max(0, bodyLength - CTB2_BODY),
     offset: start,
-    length: end - start,
+    length: bodyLength,
   };
-  // The five reserved bytes are the tail of the body.
-  part.reserved = new Uint8Array(bytes.subarray(start + 40, start + 47));
   return part;
 }
 
@@ -316,9 +356,22 @@ function writeRange(body, at, range) {
   body[at + 5] = range.retrigger & 0xff;
 }
 
-/** Put a decoded part back into its 47 bytes. */
+/**
+ * Put a decoded part back into as many bytes as it came from.
+ *
+ * The body is the length the file declared, not `CTB2_BODY`. Writing 47 bytes into
+ * a record that held 96 would silently drop 49 bytes of parameters on every save -
+ * and because the change would be invisible in the map, it would only show up as a
+ * part that sounds wrong on the instrument much later.
+ */
 function writeCtb2(part) {
-  const body = new Uint8Array(CTB2_BODY);
+  const length = part.bodyLength && part.bodyLength >= CTB2_BODY ? part.bodyLength : CTB2_BODY;
+  const body = new Uint8Array(length);
+  // Anything past the named fields is put back before the fields are written, so
+  // an untouched save is byte-identical even where this reader has no names.
+  if (part.reserved?.length) {
+    body.set(part.reserved.subarray(0, Math.max(0, length - 40)), 40);
+  }
   body[0] = part.channel & 0x0f;
   body.set(part.nameBytes ?? paddedName(part.name), 1, 8);
   body[9] = part.destinationChannel & 0x0f;
@@ -333,7 +386,6 @@ function writeCtb2(part) {
   writeRange(body, 22, part.low);
   writeRange(body, 28, part.middle);
   writeRange(body, 34, part.high);
-  for (let i = 0; i < 7; i++) body[40 + i] = part.reserved[i] & 0xff;
   return body;
 }
 
@@ -370,7 +422,11 @@ export function buildCasmBody(sections) {
   const chunks = sections.map((section) => {
     const sdec = entry('Sdec', section.nameBytes);
     const voices = section.parts.map((part) => entry('Ctb2', writeCtb2(part)));
-    return entry('CSEG', concat([sdec, ...voices]));
+    // The entries this reader did not understand, written back exactly as they
+    // were read. They go after the parts, which is where they were in the files
+    // this has seen; where they were not, the byte-level test on the collection
+    // would have said so.
+    return entry('CSEG', concat([sdec, ...voices, ...(section.extras ?? []).map((e) => e.bytes)]));
   });
   return concat(chunks);
 }
@@ -523,6 +579,11 @@ export function cloneSection(casm, afterIndex, name) {
     name: name ?? nextFreeName(casm, source.name),
     nameBytes: new Uint8Array(0),
     parts: source.parts.map(clonePart),
+    // Carried across with the parts. A duplicate is meant to be the same variation
+    // under a new name, so anything this reader did not decode is duplicated too -
+    // and copied deeply, so editing one does not reach into the other.
+    extras: (source.extras ?? []).map((e) => ({ magic: e.magic, bytes: e.bytes.slice() })),
+    warnings: (source.warnings ?? []).slice(),
     channels: source.channels.slice(),
     offset: 0,
     length: 0,
