@@ -393,3 +393,16 @@ input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; marg
 .status { margin: 16px 0 0; min-height: 22px; font-size: 14px; }
 .status.ok { color: var(--ok); }
 .status.warn { color: var(--warn); }
+
+/* ---- Right-to-left (Arabic) ---- */
+/* Flex rows and grids follow dir=rtl on their own. Only physical left/right
+   properties need mirroring. The piano-roll canvas is untouched on purpose:
+   time still flows left to right there, exactly as the tests pin it. */
+[dir="rtl"] .tl-name { text-align: left; }
+[dir="rtl"] .ops-row output { text-align: left; }
+[dir="rtl"] .var-name { text-align: right; }
+[dir="rtl"] .var-row.sel { box-shadow: inset -2px 0 0 var(--accent); }
+[dir="rtl"] .voice.active { box-shadow: inset -2px 0 0 var(--accent); }
+[dir="rtl"] .preset-item .btn { border-radius: 0 6px 6px 0; }
+[dir="rtl"] .preset-item .btn:last-child { border-radius: 6px 0 0 6px; border-left: 1px solid var(--line); border-right: 0; }
+[dir="rtl"] body { font-family: ui-sans-serif, system-ui, "Segoe UI", Tahoma, Arial, sans-serif; }

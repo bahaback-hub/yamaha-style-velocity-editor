@@ -12,6 +12,7 @@
  * labelled, because merging them would file notes from two different places under
  * one heading.
  */
+import { t, cnt } from './i18n.js';
 
 /**
  * @typedef {object} Variation
@@ -27,6 +28,8 @@
  * @property {'exact'|'silent'|'undeclared'|'partial'} match how it lines up with the map
  * @property {string[]} missing declared channels that did not sound
  * @property {number} repeatOf span index of the first span with this name, or -1
+ * @property {{numerator: number, denominator: number}} meter the time signature
+ *   in effect where the span starts (the last 0x58 event at or before it)
  */
 
 /**
@@ -37,6 +40,19 @@
  * @param {{ticksPerBar: number}} meter
  * @returns {Variation[]}
  */
+/**
+ * The time signature in effect at a tick: the last 0x58 event at or before it,
+ * falling back to the file's overall signature when nothing precedes it.
+ */
+export function meterAt(timeSigEvents, global, tick) {
+  let current = global ?? { numerator: 4, denominator: 4 };
+  for (const e of timeSigEvents ?? []) {
+    if (e.tick <= tick) current = { numerator: e.numerator, denominator: e.denominator };
+    else break;
+  }
+  return current;
+}
+
 export function buildVariations(parsed, casm, meter) {
   const declared = new Map((casm?.sections ?? []).map((s) => [s.name, s.channels]));
   /** @type {Map<string, number>} */
@@ -66,6 +82,7 @@ export function buildVariations(parsed, casm, meter) {
       index: i,
       startTick: span.startTick,
       endTick: span.endTick,
+      meter: meterAt(parsed.timeSigEvents, parsed.timeSignature, span.startTick),
       bars: Math.max(1, Math.round((span.endTick - span.startTick) / tpb)),
       notes: inside.length,
       channels,
@@ -95,10 +112,13 @@ export function notesInSpan(notes, span) {
  * @returns {string}
  */
 export function describeMatch(v) {
-  if (v.match === 'undeclared') return 'not declared in the map';
-  if (v.match === 'silent') return 'declared, but silent here';
+  if (v.match === 'undeclared') return t('vv_match_undeclared');
+  if (v.match === 'silent') return t('vv_match_silent');
   if (v.match === 'partial') {
-    return `declared ${v.declared.length} part(s); ${v.missing.map((c) => `ch${c + 1}`).join(', ')} did not sound`;
+    return t('vv_match_partial', {
+      declared: cnt(v.declared.length, 'part'),
+      missing: v.missing.map((c) => `ch${c + 1}`).join(', '),
+    });
   }
-  return 'matches the map';
+  return t('vv_match_ok');
 }

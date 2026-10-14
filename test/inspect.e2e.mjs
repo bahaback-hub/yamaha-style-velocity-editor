@@ -16,6 +16,7 @@ const OUT = 'C:/Users/DSER/AppData/Local/Temp/opencode/sty-e2e2';
 mkdirSync(OUT, { recursive: true });
 const PORT = process.env.PORT ?? '5173';
 const BASE = `http://localhost:${PORT}/`;
+const BASE_EN = BASE + '?lang=en'; // existing assertions match English strings
 
 // ---- a fixture that looks like a real export --------------------------------
 function track(events) {
@@ -171,7 +172,7 @@ const check = (name, ok, detail = '') => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
-await page.goto(BASE, { waitUntil: 'load' });
+await page.goto(BASE_EN, { waitUntil: 'load' });
 check('page loads clean', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 await page.setInputFiles('#file', styPath);

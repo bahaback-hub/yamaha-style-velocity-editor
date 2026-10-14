@@ -254,7 +254,7 @@ test('resolveMeter replaces an implausible meter and says so', () => {
   const m = resolveMeter({ numerator: 10, denominator: 4 }, 3840, 480);
   assert.equal(m.source, BLOCK_SOURCE.inferred);
   assert.equal(m.numerator, 4);
-  assert.match(m.note, /does not fit/);
+  assert.equal(m.decl, '10/4');
   assert.ok(m.bars <= MAX_BARS);
 });
 

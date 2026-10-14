@@ -48,9 +48,12 @@ export function resolveMeter(declared, lengthTicks, division) {
     numerator: 4,
     denominator: 4,
     source: BLOCK_SOURCE.inferred,
-    note:
+    // Structured, not prose: the display layer (app.js) turns decl into a
+    // sentence in the interface language. Prose here would freeze English
+    // into every caller.
+    decl:
       declared.numerator !== 4 || declared.denominator !== 4
-        ? `the file declares ${declared.numerator}/${declared.denominator}, which does not fit this file`
+        ? `${declared.numerator}/${declared.denominator}`
         : '',
     bars: Math.min(MAX_BARS, Math.max(1, Math.ceil(lengthTicks / tpbFallback))),
     ticksPerBar: tpbFallback,

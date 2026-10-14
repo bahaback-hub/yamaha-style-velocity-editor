@@ -17,6 +17,7 @@ import { join } from 'node:path';
 const OUT = 'C:/Users/DSER/AppData/Local/Temp/opencode/sty-e2e-real';
 mkdirSync(OUT, { recursive: true });
 const BASE = `http://localhost:${process.env.PORT ?? '5173'}/`;
+const BASE_EN = BASE + '?lang=en'; // existing assertions match English strings
 
 // The user's own export, copied out of the workspace rather than referenced in
 // place, so the test never touches the original.
@@ -68,7 +69,7 @@ const baseline = (() => {
   return map;
 })();
 
-await page.goto(BASE, { waitUntil: 'load' });
+await page.goto(BASE_EN, { waitUntil: 'load' });
 await page.setInputFiles('#file', styPath);
 await page.waitForSelector('#panelEdit:not(.hidden)', { timeout: 30000 });
 

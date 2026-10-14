@@ -8,7 +8,7 @@
  * and every file is imported regardless.
  */
 
-const SUITES = ['ui', 'inspect', 'editor', 'lift', 'real'];
+const SUITES = ['ui', 'inspect', 'editor', 'lift', 'real', 'i18n'];
 
 let failedSuites = 0;
 

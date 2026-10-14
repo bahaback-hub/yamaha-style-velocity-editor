@@ -14,6 +14,7 @@ import { join } from 'node:path';
 const OUT = 'C:/Users/DSER/AppData/Local/Temp/opencode/sty-e2e3';
 mkdirSync(OUT, { recursive: true });
 const BASE = `http://localhost:${process.env.PORT ?? '5173'}/`;
+const BASE_EN = BASE + '?lang=en'; // existing assertions match English strings
 
 // ---- fixture ----------------------------------------------------------------
 // Two parts on two tracks, so a structural edit has to survive the second
@@ -183,7 +184,7 @@ const check = (name, ok, detail = '') => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
-await page.goto(BASE, { waitUntil: 'load' });
+await page.goto(BASE_EN, { waitUntil: 'load' });
 await page.setInputFiles('#file', styPath);
 await page.waitForSelector('#panelEdit:not(.hidden)', { timeout: 20000 });
 
@@ -548,6 +549,54 @@ await dlNoop.saveAs(join(OUT, 'map-noop.sty'));
 const noopMsg = await page.locator('#status').textContent();
 check('a download with nothing pending does not claim to have changed anything',
   /No changes to write|copy of the original/.test(noopMsg), noopMsg.slice(0, 80));
+
+// ---- part details: Ctb2 fields ------------------------------------------------
+// The writer path already knew field operations; this is the interface that
+// stages them. Same contract as the dots: stage on screen, download, read back.
+if (await page.locator('#btnRevert').isEnabled()) {
+  await page.click('#btnRevert');
+  await page.waitForTimeout(150);
+}
+check('the part details panel appears with the map',
+  await page.locator('#blockPartDetails').isVisible());
+await page.selectOption('#pdSection', 'Main A');
+await page.selectOption('#pdPart', '9');
+check('destination starts at the file value',
+  await page.locator('#pd-destinationChannel').inputValue() === '9',
+  await page.locator('#pd-destinationChannel').inputValue());
+// Route the Main A drums to channel 5 (index 4). The fixture stores 9.
+await page.locator('#pd-destinationChannel').selectOption('4');
+await page.waitForTimeout(150);
+check('a field edit counts as a pending edit',
+  await page.locator('#btnDownload').isEnabled());
+check('the staged field edit is reported',
+  /Field edits staged: 1/.test(await page.locator('#pdSummary').textContent()),
+  await page.locator('#pdSummary').textContent());
+
+const [dlField] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const savedField = join(OUT, 'field.sty');
+await dlField.saveAs(savedField);
+const fieldBytes = readFileSync(savedField);
+check('a field edit changes no lengths',
+  fieldBytes.length === originalBytes.length, `${originalBytes.length} -> ${fieldBytes.length}`);
+const drumA = parseCasm(toBuf(fieldBytes)).sections[0].parts.find((p) => p.channel === 9);
+check('destination channel written into the record',
+  drumA && drumA.destinationChannel === 4, JSON.stringify(drumA && drumA.destinationChannel));
+
+// Restoring the file value must prune the operation: nothing staged, and the
+// download is byte-identical to the original (the button stays enabled while
+// notes are selected — it writes a copy, exactly like the no-op download).
+await page.selectOption('#pd-destinationChannel', '9');
+await page.waitForTimeout(150);
+check('restoring the file value drops the staged op',
+  /No pending edits/.test(await page.locator('#editCount').textContent()),
+  await page.locator('#editCount').textContent());
+const [dlRestore] = await Promise.all([page.waitForEvent('download'), page.click('#btnDownload')]);
+const savedRestore = join(OUT, 'field-restore.sty');
+await dlRestore.saveAs(savedRestore);
+check('the restored download is byte-identical to the original',
+  Buffer.compare(readFileSync(savedRestore), originalBytes) === 0,
+  `${readFileSync(savedRestore).length} vs ${originalBytes.length}`);
 
 // ---- adding and removing notes ------------------------------------------------
 // A part is built by adding to it and taking from it, not only by retuning what is

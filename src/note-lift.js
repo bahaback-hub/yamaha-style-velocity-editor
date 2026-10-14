@@ -20,6 +20,7 @@ import {
   offsetVelocity, humanizeVelocity, randomVelocity,
   curveVelocity, accentVelocity, clamp,
 } from './velocity-lane.js';
+import { t, cnt } from './i18n.js';
 
 /**
  * @typedef {'up'|'down'|'set'|'accent'|'humanise'|'random'|'curve'} LiftKind
@@ -58,7 +59,10 @@ export class NoteLift {
     this.data = data;
     this.root.textContent = '';
     if (!data.parts.length) {
-      this.root.innerHTML = '<p class="empty">No parts found.</p>';
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = t('nl_no_parts');
+      this.root.append(empty);
       return;
     }
     this.root.append(this.#row());
@@ -81,7 +85,7 @@ export class NoteLift {
     for (const p of this.data.parts) {
       const o = document.createElement('option');
       o.value = String(p.channel);
-      o.textContent = `${p.label} · ch ${p.channel + 1}`;
+      o.textContent = t('part_option', { label: p.label, ch: p.channel + 1 });
       part.append(o);
     }
     if (this.channel === null) this.channel = this.data.parts[0].channel;
@@ -95,19 +99,19 @@ export class NoteLift {
     const scope = document.createElement('select');
     scope.className = 'lift-select';
     scope.id = 'liftScope';
-    for (const [value, label] of [
-      ['all', 'Whole style'],
-      ['variation', 'This variation only'],
+    for (const [value, key] of [
+      ['all', 'nl_scope_all'],
+      ['variation', 'nl_scope_var'],
     ]) {
       const o = document.createElement('option');
       o.value = value;
-      o.textContent = label;
+      o.textContent = t(key);
       scope.append(o);
     }
     scope.value = this.handlers.scope?.() ?? 'all';
     scope.addEventListener('change', () => this.handlers.setScope?.(scope.value));
 
-    row.append(this.#field('Part', part), this.#field('Applies to', scope));
+    row.append(this.#field(t('ed_part'), part), this.#field(t('nl_applies'), scope));
     return row;
   }
 
@@ -123,7 +127,10 @@ export class NoteLift {
       .sort((a, b) => a - b);
 
     if (!notes.length) {
-      row.innerHTML = '<p class="empty">This part has no notes.</p>';
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = t('roll_empty');
+      row.append(empty);
       this.noteHost.append(row);
       this.summaryEl = null;
       return;
@@ -151,7 +158,7 @@ export class NoteLift {
     value.id = 'liftValue';
     value.className = 'lift-number';
     value.value = String(this.value);
-    value.title = 'How much Louder and Softer move each occurrence, and what Set to puts it at';
+    value.title = t('nl_howmuch');
     value.addEventListener('change', () => { this.value = clamp(Number(value.value) || this.value); value.value = String(this.value); this.#renderSummary(); });
 
     const spread = document.createElement('input');
@@ -160,34 +167,34 @@ export class NoteLift {
     spread.id = 'liftSpread';
     spread.className = 'lift-number';
     spread.value = String(this.spread);
-    spread.title = 'Humanise spread';
+    spread.title = t('nl_spread');
     spread.addEventListener('change', () => { this.spread = Math.max(0, Math.min(126, Number(spread.value) || 0)); spread.value = String(this.spread); });
 
     const buttons = document.createElement('div');
     buttons.className = 'lift-buttons';
-    for (const [kind, label, title] of [
-      ['up', 'Louder', 'Add the value to every occurrence'],
-      ['down', 'Softer', 'Take the value off every occurrence'],
-      ['set', 'Set to', 'Put every occurrence at the value'],
-      ['accent', 'Accent', 'Add the value only where the note is already loud'],
-      ['humanise', 'Humanise', 'Spread the occurrences around by the spread value'],
-      ['random', 'Random', 'Scatter the occurrences across the whole range'],
-      ['curve', 'Curve', 'Louder towards the end of the variation, quieter at the start'],
+    for (const [kind, labelKey, titleKey] of [
+      ['up', 'nl_up', 'nl_up_desc'],
+      ['down', 'nl_down', 'nl_down_desc'],
+      ['set', 'nl_set', 'nl_set_desc'],
+      ['accent', 'nl_accent', 'nl_accent_desc'],
+      ['humanise', 'nl_humanise', 'nl_humanise_desc'],
+      ['random', 'nl_random', 'nl_random_desc'],
+      ['curve', 'nl_curve', 'nl_curve_desc'],
     ]) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'btn btn-sm';
       b.dataset.lift = kind;
-      b.textContent = label;
-      b.title = title;
+      b.textContent = t(labelKey);
+      b.title = t(titleKey);
       b.addEventListener('click', () => this.#run(kind));
       buttons.append(b);
     }
 
     row.append(
-      this.#field('Note', note),
-      this.#field('Value', value),
-      this.#field('Spread', spread),
+      this.#field(t('nl_note'), note),
+      this.#field(t('nl_value'), value),
+      this.#field(t('nl_spread'), spread),
     );
     row.append(buttons);
 
@@ -228,14 +235,18 @@ export class NoteLift {
     if (!this.summaryEl) return;
     const targets = this.#targets();
     if (!targets.length) {
-      this.summaryEl.textContent = 'Nothing to change in this scope.';
+      this.summaryEl.textContent = t('nl_nothing_scope');
       return;
     }
     const values = targets.map((n) => this.handlers.current ? this.handlers.current(n) : n.velocity);
     const bars = new Set(targets.map((n) => Math.floor(n.at / (this.handlers.ticksPerBar?.() ?? 1920)))).size;
-    this.summaryEl.textContent =
-      `${targets.length} occurrence${targets.length === 1 ? '' : 's'} across ${bars} bar${bars === 1 ? '' : 's'}`
-      + ` · velocity now ${Math.min(...values)}\u2013${Math.max(...values)}, avg ${(values.reduce((a, b) => a + b, 0) / values.length).toFixed(1)}`;
+    this.summaryEl.textContent = t('nl_summary', {
+      occ: cnt(targets.length, 'occurrence'),
+      bars: cnt(bars, 'bar'),
+      lo: Math.min(...values),
+      hi: Math.max(...values),
+      avg: (values.reduce((a, b) => a + b, 0) / values.length).toFixed(1),
+    });
   }
 
   #run(kind) {
@@ -268,7 +279,7 @@ export class NoteLift {
     const applied = changes.filter(Boolean);
     if (!applied.length) {
       // Nothing moved, and saying so beats a button that appears to work.
-      this.summaryEl.textContent = 'Nothing to change: every occurrence is already there.';
+      this.summaryEl.textContent = t('nl_nothing_there');
       return;
     }
     this.handlers.apply?.(applied);

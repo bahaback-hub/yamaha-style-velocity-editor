@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readSff, readChunks, findMidiPayloads } from '../src/sff.js';
 import { indexNotes, indexTracksOnly, applyVelocity, noteName, readVarLen } from '../src/smf.js';
+import { buildVariations, meterAt } from '../src/variations.js';
 
 /** Build an SMF track from raw event bytes, prefixing the MTrk header. */
 function track(events) {
@@ -386,6 +387,66 @@ test('a truncated payload yields an error rather than a bogus index', () => {
   const { payloads } = findMidiPayloads(buf);
   assert.ok(indexNotes(buf, payloads[0].offset + 3, payloads[0].size).error);
 });
+
+test('every time-signature event is kept, and each variation gets the one in effect', () => {
+  // 4/4 at tick 0, then 3/4 at tick 960; markers open Main A at 0, Main B at 960.
+  const sig = (n, d) => [0xff, 0x58, 0x04, n, d, 0x18, 0x08];
+  const marker = (gap, name) => [
+    ...vlq(gap), 0xff, 0x06, name.length, ...[...name].map((c) => c.charCodeAt(0)),
+  ];
+  const trk = track([
+    0x00, ...sig(0x04, 0x02),
+    ...marker(0, 'Main A'),
+    0x00, 0x99, 36, 90, 0x60, 0x89, 36, 0,
+    ...vlq(960 - 96), ...sig(0x03, 0x02),
+    ...marker(0, 'Main B'),
+    0x00, 0x99, 36, 90, 0x60, 0x89, 36, 0,
+  ]);
+  const smf = concat([mthd(1), trk]);
+  const sty = concat([sffHead(), chunk('Smed', chunk('MID', smf))]);
+  const buf = sty.buffer.slice(sty.byteOffset, sty.byteOffset + sty.byteLength);
+  const { payloads } = findMidiPayloads(buf);
+  const parsed = indexNotes(buf, payloads[0].offset, payloads[0].size);
+
+  assert.deepEqual(
+    parsed.timeSigEvents.map((e) => [e.tick, e.numerator, e.denominator]),
+    [[0, 4, 4], [960, 3, 4]],
+  );
+  // The file-wide signature stays the last one, as before.
+  assert.deepEqual([parsed.timeSignature.numerator, parsed.timeSignature.denominator], [3, 4]);
+
+  assert.deepEqual(meterAt(parsed.timeSigEvents, parsed.timeSignature, 0), { numerator: 4, denominator: 4 });
+  assert.deepEqual(meterAt(parsed.timeSigEvents, parsed.timeSignature, 959), { numerator: 4, denominator: 4 });
+  assert.deepEqual(meterAt(parsed.timeSigEvents, parsed.timeSignature, 960), { numerator: 3, denominator: 4 });
+
+  const variations = buildVariations(parsed, null, { ticksPerBar: 1920 });
+  const a = variations.find((v) => v.name === 'Main A');
+  const b = variations.find((v) => v.name === 'Main B');
+  assert.deepEqual([a.meter.numerator, a.meter.denominator], [4, 4]);
+  assert.deepEqual([b.meter.numerator, b.meter.denominator], [3, 4]);
+});
+
+function vlq(n) {
+  if (n < 128) return [n];
+  const bytes = [];
+  let v = n;
+  const parts = [];
+  while (v > 0) {
+    parts.unshift(v & 0x7f);
+    v >>>= 7;
+  }
+  for (let i = 0; i < parts.length - 1; i++) bytes.push(parts[i] | 0x80);
+  bytes.push(parts[parts.length - 1]);
+  return bytes;
+}
+
+function sffHead() {
+  const head = new Uint8Array(12);
+  head.set([0x53, 0x46, 0x46, 0x32], 0);
+  head[7] = 8;
+  head.set([0x53, 0x53, 0x54, 0x4e], 8);
+  return head;
+}
 
 
 

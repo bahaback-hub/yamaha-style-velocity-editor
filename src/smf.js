@@ -112,6 +112,8 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
    * @type {{tick: number, name: string, kind: 'marker'|'cue'}[]}
    */
   const markers = [];
+  /** Every time-signature event, in file order — sections each get the one in effect. */
+  const timeSigEvents = [];
   const limit = payloadOffset + payloadSize;
   const empty = (error) => ({
     notes,
@@ -120,6 +122,7 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
     layout: 'smf',
     tempoMap: [],
     timeSignature: { numerator: 4, denominator: 4 },
+    timeSigEvents,
     lengthTicks: 0,
     markers,
     sectionSpans: buildSectionSpans(markers, 0, null),
@@ -215,6 +218,9 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
               numerator: view.getUint8(body),
               denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
             };
+            // Kept, not just the last one: a style can change meter mid-file,
+            // and each variation shows the signature in effect where it starts.
+            timeSigEvents.push({ tick: abs, ...timeSignature });
           } else if ((type === 0x06 || type === 0x07) && len.value > 0) {
             // A marker, or a cue point. Yamaha styles use these to say where each
             // variation begins in time - the performance is flattened into one
@@ -345,7 +351,7 @@ export function indexNotes(buffer, payloadOffset, payloadSize) {
 
   return {
     notes, tracks: trackIndex, division, layout: 'smf',
-    tempoMap, timeSignature, lengthTicks, trackList,
+    tempoMap, timeSignature, timeSigEvents, lengthTicks, trackList,
     markers, sectionSpans: buildSectionSpans(markers, lengthTicks, endOfTrackTick),
   };
 }
@@ -475,6 +481,8 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
   const tempoMap = [{ tick: 0, usPerQuarter: 500000 }];
   /** @type {TimeSignature} */
   let timeSignature = { numerator: 4, denominator: 4 };
+  /** Every time-signature event, in file order — sections each get the one in effect. */
+  const timeSigEvents = [];
   /** @type {Map<string, NoteHit[]>} */
   const pending = new Map();
   /** Raw events per track, so this copy can be edited and written back too. */
@@ -538,6 +546,7 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
               numerator: view.getUint8(body),
               denominator: denom > 0 && denom < 16 ? 2 ** denom : 4,
             };
+            timeSigEvents.push({ tick: abs, ...timeSignature });
           }
           events.push({
             kind: 'meta',
@@ -629,7 +638,7 @@ export function indexTracksOnly(buffer, payloadOffset, payloadSize) {
 
   return {
     notes, tracks: trackIndex, division: 0, layout: 'tracks-only',
-    tempoMap, timeSignature, lengthTicks, trackList,
+    tempoMap, timeSignature, timeSigEvents, lengthTicks, trackList,
   };
 }
 

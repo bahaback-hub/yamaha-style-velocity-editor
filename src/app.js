@@ -33,11 +33,13 @@ import {
 import { applyEdits, findCollisions, clampVelocity } from './edits.js';
 import {
   parseCasm, writeCasm, casmWithEdits, styleParts, applyCasmOperations,
+  NOTE_CLASSES, CHORD_TYPES, RETRIGGER_RULES,
 } from './cseg.js';
 import { MapView, describeMap } from './map-view.js';
 import { VariationView } from './variation-view.js';
 import { buildVariations } from './variations.js';
 import { NoteLift } from './note-lift.js';
+import { t, cnt, initLang, setLang, getLang, applyI18n, secKey } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -56,6 +58,8 @@ const el = {
   status: $('status'),
   map: $('map'), mapHint: $('mapHint'), mapSummary: $('mapSummary'),
   blockMap: $('blockMap'), btnCopyMap: $('btnCopyMap'), saveHint: $('saveHint'),
+  blockPartDetails: $('blockPartDetails'), pdSection: $('pdSection'), pdPart: $('pdPart'),
+  pdFields: $('pdFields'), pdSummary: $('pdSummary'),
   vars: $('vars'), variationsHint: $('variationsHint'), variationsSummary: $('variationsSummary'),
   blockVariationPlay: $('blockVariationPlay'), playVariation: $('playVariation'),
   playLoop: $('playLoop'), playCountIn: $('playCountIn'),
@@ -73,6 +77,7 @@ const el = {
 
   presetName: $('presetName'), presetList: $('presetList'), btnPresetSave: $('btnPresetSave'),
   btnJsonExport: $('btnJsonExport'), btnJsonImport: $('btnJsonImport'), jsonFile: $('jsonFile'),
+  btnLang: $('btnLang'),
 };
 
 // Two palettes over the same families. `var(--fam-drums)` works in CSS but means
@@ -93,8 +98,8 @@ const laneHex = (family) => LANE_HEX[family] ?? LANE_HEX.other;
 // Plain words rather than glyphs: two characters here did not survive an
 // earlier shell round-trip of this file and silently became mojibake in the
 // transport button.
-const PLAY_LABEL = 'Play';
-const PAUSE_LABEL = 'Pause';
+const PLAY_LABEL = () => t('btn_play');
+const PAUSE_LABEL = () => t('btn_pause');
 
 const PRESET_KEY = 'sty-editor.presets.v1';
 
@@ -194,10 +199,10 @@ function effective(note) {
   };
 }
 
-/** A tick as "bar 3", for saying where something happened. */
+/** A tick as "bar 3" / "شريط 3", for saying where something happened. */
 function barLabel(tick) {
-  if (!state) return 'bar 1';
-  return `bar ${Math.floor(tick / state.tpb) + 1}`;
+  const n = !state ? 1 : Math.floor(tick / state.tpb) + 1;
+  return t('bar_at', { n });
 }
 
 /**
@@ -215,7 +220,7 @@ function barLabel(tick) {
  */
 function stageAddition(add) {
   state.added.push(add);
-  say(`Added ${noteName(add.pitch)} at ${barLabel(add.at)}.`, 'ok');
+  say(t('note_added', { pitch: noteName(add.pitch), bar: barLabel(add.at) }), 'ok');
 }
 
 function stageRemoval(note) {
@@ -228,13 +233,13 @@ function stageRemoval(note) {
   state.removed.add(note);
   state.pendingVelocity.delete(noteKey(note));
   state.pendingShape.delete(noteKey(note));
-  say(`Removed ${noteName(note.note)} at ${barLabel(note.at)}.`, 'ok');
+  say(t('note_removed', { pitch: noteName(note.note), bar: barLabel(note.at) }), 'ok');
 }
 
 /** Undo a removal, so a note brought back is the one that was there. */
 function unstageRemoval(note) {
   if (!state.removed.delete(note)) return;
-  say(`Restored ${noteName(note.note)} at ${barLabel(note.at)}.`, 'ok');
+  say(t('note_restored', { pitch: noteName(note.note), bar: barLabel(note.at) }), 'ok');
 }
 
 const isRemoved = (note) => state?.removed.has(note) ?? false;
@@ -315,7 +320,7 @@ function parseAll(buffer) {
 async function loadFile(file) {
   if (!file) return;
   try {
-    say('Reading\u2026');
+    say(t('reading'));
     const buffer = await file.arrayBuffer();
     const parsed = parseAll(buffer);
     const { info, notes, payloads, parsedByPayload, tempoMap, timeSignature, division, lengthTicks, spans } = parsed;
@@ -415,11 +420,11 @@ async function loadFile(file) {
 
     const skipped = payloads.filter((p) => !p.ok);
     if (skipped.length) {
-      say(`Loaded, but ${skipped.map((p) => p.kind).join(' and ')} could not be read, so the edit will only reach ${payloads.filter((p) => p.ok).map((p) => p.kind).join(' and ')}. Newer arrangers may play the untouched copy.`, 'warn');
+      say(t('loaded_partial', { a: skipped.map((p) => p.kind).join(' and '), b: payloads.filter((p) => p.ok).map((p) => p.kind).join(' and ') }), 'warn');
     } else if (mapWarnings.length) {
-      say(`Loaded ${notes.length} notes. The variation map is not completely readable: ${mapWarnings.join('; ')}. Those bytes are kept as they are, but the map shown here may be incomplete.`, 'warn');
+      say(t('loaded_mapwarn', { n: notes.length, w: mapWarnings.join('; ') }), 'warn');
     } else {
-      say(`Loaded ${notes.length} notes. Pick a part, then drag in the velocity lane or the roll.`, 'ok');
+      say(t('loaded_ok', { n: notes.length }), 'ok');
     }
     refresh();
   } catch (err) {
@@ -539,25 +544,29 @@ function renderVariations() {
   variationView.render(variations, { ticksPerBar: state.tpb });
 
   const bars = variations.reduce((a, v) => a + v.bars, 0);
-  el.variationsHint.textContent = `${variations.length} occurrence${variations.length === 1 ? '' : 's'}`
-    + ` \u00b7 ${bars} bars \u00b7 in the order the style plays them`;
+  el.variationsHint.textContent = t('varswhen_hint_line', {
+    occ: cnt(variations.length, 'occurrence'),
+    bars: cnt(bars, 'bar'),
+  });
   const mismatched = variations.filter((v) => v.match === 'partial');
   const undeclared = variations.filter((v) => v.match === 'undeclared');
   const silent = variations.filter((v) => v.match === 'silent');
   const bits = [];
   if (undeclared.length) {
-    bits.push(`${undeclared.length} variation${undeclared.length === 1 ? '' : 's'} not declared in the map (${undeclared.map((v) => v.name).join(', ')})`);
+    bits.push(t('varswhen_undeclared', { n: cnt(undeclared.length, 'variation'), names: undeclared.map((v) => v.name).join(', ') }));
   }
   if (silent.length) {
-    bits.push(`${silent.length} declared but silent here (${silent.map((v) => v.name).join(', ')})`);
+    bits.push(t('varswhen_silent', { n: cnt(silent.length, 'variation'), names: silent.map((v) => v.name).join(', ') }));
   }
   if (mismatched.length) {
-    bits.push(`${mismatched.length} where a declared part did not sound: `
-      + mismatched.map((v) => `${v.name} (${v.missing.map((c) => `ch${c + 1}`).join(', ')})`).join('; '));
+    bits.push(t('varswhen_mismatch', {
+      n: cnt(mismatched.length, 'variation'),
+      detail: mismatched.map((v) => `${v.name} (${v.missing.map((c) => `ch${c + 1}`).join(', ')})`).join('; '),
+    }));
   }
   el.variationsSummary.innerHTML = bits.length
-    ? `<b>Worth knowing:</b> ${esc(bits.join('. '))}.`
-    : 'Every variation matches what the map declares.';
+    ? `<b>${esc(t('varswhen_worth'))}</b> ${esc(bits.join('. '))}.`
+    : esc(t('varswhen_all_match'));
   renderPlayVariation();
 }
 
@@ -578,7 +587,7 @@ function renderPlayVariation() {
     seen.set(v.name, n);
     const o = document.createElement('option');
     o.value = String(index);
-    o.textContent = `${v.name}${v.bars ? ` \u00b7 ${v.bars} bar${v.bars === 1 ? '' : 's'}` : ''}`;
+    o.textContent = v.bars ? t('pvary_option', { name: v.name, n: cnt(v.bars, 'bar') }) : v.name;
     el.playVariation.append(o);
   });
 
@@ -616,7 +625,7 @@ function describePlayVariation() {
   const bars = v.bars ?? Math.max(1, Math.round((v.endTick - v.startTick) / state.tpb));
   const secs = tickToSeconds(state.tempoMap, v.endTick, state.division)
     - tickToSeconds(state.tempoMap, v.startTick, state.division);
-  const length = `${bars} bar${bars === 1 ? '' : 's'}, ${secs.toFixed(1)}s`;
+  const length = t('pvary_len', { bars: cnt(bars, 'bar'), secs: t('clock_s', { s: secs.toFixed(1) }) });
 
   // A variation that holds none of the parts currently switched on would play
   // silence, which looks like a broken button. Say so, and say why.
@@ -625,7 +634,7 @@ function describePlayVariation() {
   ).length;
   el.playVariationHint.textContent = sounding
     ? length
-    : `${length} \u00b7 silent: none of the parts you have switched on play here`;
+    : t('pvary_silent', { len: length });
 }
 
 function mountVariations() {
@@ -713,7 +722,7 @@ function renderPartSelect() {
   for (const r of state.rows) {
     const o = document.createElement('option');
     o.value = String(r.channel);
-    o.textContent = `${r.label} \u00b7 ch ${r.channel + 1}`;
+    o.textContent = t('part_option', { label: r.label, ch: r.channel + 1 });
     el.partSelect.append(o);
   }
   el.partSelect.value = String(state.activeChannel);
@@ -760,10 +769,12 @@ function setActivePart(channel, { fit = false, preserveView = false } = {}) {
   const pendingHere = notes.filter((n) => pendingVelocityOf(n) !== null || pendingShapeOf(n) !== null).length;
   const addedHere = shown.length - notes.length;
   el.editorHint.textContent = shown.length
-    ? `${shown.length} notes`
-      + (addedHere ? ` (${addedHere} new)` : '')
-      + ` \u00b7 ${pendingHere ? `${pendingHere} edited` : 'no edits yet'}`
-    : 'no notes';
+    ? t('editor_hint_line', {
+      notes: cnt(shown.length, 'note'),
+      extra: addedHere ? ` (${t('editor_hint_new', { n: addedHere })})` : '',
+      pending: pendingHere ? t('editor_hint_edited', { n: pendingHere }) : t('editor_hint_noedits'),
+    })
+    : t('editor_hint_nonotes');
   draw();
   refresh();
 }
@@ -825,10 +836,11 @@ function renderMap() {
     el.map.append(Object.assign(document.createElement('p'), {
       className: 'empty',
       textContent: state.casmError
-        ? `This file's variation map could not be read: ${state.casmError}`
-        : 'This file has no variation map. The note tools below still work on it.',
+        ? t('map_unreadable', { err: state.casmError })
+        : t('map_no_map_tools'),
     }));
     el.mapSummary.textContent = '';
+    renderPartDetails();
     return;
   }
 
@@ -838,21 +850,190 @@ function renderMap() {
   mapView.render(casm, parts, { editable: true });
 
   const info = describeMap(live);
-  el.mapHint.textContent = `${live.sections.length} variation${live.sections.length === 1 ? '' : 's'}`
-    + ` \u00b7 ${parts.length} part${parts.length === 1 ? '' : 's'}`;
+  el.mapHint.textContent = t('map_hint_line', {
+    vars: cnt(live.sections.length, 'variation'),
+    parts: cnt(parts.length, 'part'),
+  });
   const staged = state.casmOps.length;
   el.mapSummary.innerHTML = info.complete
     ? ''
-    : `<b>Note:</b> ${esc(info.text)}`;
+    : `<b>${esc(t('map_note'))}</b> ${esc(info.text)}`;
   if (staged) {
-    el.mapSummary.innerHTML += `<br><b>${staged}</b> map change${staged === 1 ? '' : 's'} staged.`;
+    el.mapSummary.innerHTML += `<br>${esc(t('map_staged', { n: staged, s: staged === 1 ? '' : 's', c: cnt(staged, 'change') }))}`;
   }
   if (state.casmError) {
-    el.mapSummary.innerHTML += `<br><b>Could not apply a change:</b> ${esc(state.casmError)}`;
+    el.mapSummary.innerHTML += `<br><b>${esc(t('map_apply_failed'))}</b> ${esc(state.casmError)}`;
   }
   // A map change alters what the variations are declared to contain, so the
   // variation list has to be rebuilt or its check marks would go stale.
   refreshVariations();
+  renderPartDetails();
+}
+
+/**
+ * Read one editable Ctb2 field for the details panel.
+ * Range fields (low/middle/high) arrive as { range, sub } and read one sub-key.
+ */
+function pdRead(part, spec) {
+  if (spec.range) return part[spec.range]?.[spec.sub];
+  return part[spec.field];
+}
+
+/** The staged value shape setField understands: scalars, or a patch for ranges. */
+function pdStageValue(spec, raw) {
+  if (spec.range) return { [spec.sub]: Number(raw) };
+  return Number(raw);
+}
+
+/** True when a staged field op actually differs from the file. */
+function pdDiffers(part, field, value) {
+  if (value !== null && typeof value === 'object') {
+    const range = part[field];
+    if (!range || typeof range !== 'object') return true;
+    return Object.entries(value).some(([k, v]) => range[k] !== v);
+  }
+  return part[field] !== value;
+}
+
+/** One staged field op replaces another for the same cell, like channel dots. */
+function stageFieldOp(section, channel, spec, raw) {
+  stageCasm({ op: 'field', section, channel, field: spec.range ?? spec.field, value: pdStageValue(spec, raw) });
+}
+
+/** Ctb2 fields the details panel offers, in display order. */
+const PD_FIELDS = [
+  { field: 'destinationChannel', kind: 'channel', label: 'pdet_dest' },
+  { field: 'chordKey', kind: 'pitchclass', label: 'pdet_chordkey' },
+  { field: 'chordType', kind: 'chordtype', label: 'pdet_chordtype' },
+  { field: 'middleLow', kind: 'byte', label: 'pdet_midlow' },
+  { field: 'middleHigh', kind: 'byte', label: 'pdet_midhigh' },
+  { range: 'middle', sub: 'retrigger', kind: 'retrigger', label: 'pdet_retrigger' },
+];
+
+let pdSectionName = null;
+let pdChannel = null;
+
+function pdSelect(labelText, id, options, current, onPick) {
+  const wrap = document.createElement('label');
+  wrap.className = 'inline';
+  const span = document.createElement('span');
+  span.textContent = labelText;
+  const sel = document.createElement('select');
+  sel.id = id;
+  for (const [value, text] of options) {
+    const o = document.createElement('option');
+    o.value = String(value);
+    o.textContent = text;
+    sel.append(o);
+  }
+  sel.value = String(current);
+  sel.addEventListener('change', () => onPick(sel.value));
+  wrap.append(span, sel);
+  return wrap;
+}
+
+function pdNumber(labelText, id, value, lo, hi, onPick) {
+  const wrap = document.createElement('label');
+  wrap.className = 'inline';
+  const span = document.createElement('span');
+  span.textContent = labelText;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.id = id;
+  input.value = String(value ?? '');
+  // Stage on change, not on every keystroke: halfway through "127" the field
+  // reads "12", and that is not a value anyone asked to write.
+  input.addEventListener('change', () => {
+    const n = Math.max(lo, Math.min(hi, Math.round(Number(input.value))));
+    if (!Number.isFinite(n)) {
+      renderPartDetails();
+      return;
+    }
+    input.value = String(n);
+    onPick(n);
+  });
+  wrap.append(span, input);
+  return wrap;
+}
+
+/**
+ * The Ctb2 fields behind one map cell, editable.
+ *
+ * Values shown are the staged ones (currentMap replays casmOps), so the panel
+ * never disagrees with the download. Nothing writes until download: every
+ * change stages a {op:'field'} operation next to the dot toggles.
+ */
+function renderPartDetails() {
+  const box = el.blockPartDetails;
+  if (!box) return;
+  const { casm } = currentMap();
+  if (!state || !casm || !casm.sections.length) {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+
+  const section = casm.sections.find((s) => s.name === pdSectionName) ?? casm.sections[0];
+  pdSectionName = section.name;
+  const part = section.parts.find((p) => p.channel === pdChannel) ?? section.parts[0];
+  if (!part) {
+    el.pdFields.textContent = '';
+    el.pdSummary.textContent = t('mv_no_parts');
+    return;
+  }
+  pdChannel = part.channel;
+
+  el.pdSection.textContent = '';
+  el.pdSection.append(...casm.sections.map((s) => {
+    const o = document.createElement('option');
+    o.value = s.name;
+    o.textContent = s.name;
+    return o;
+  }));
+  el.pdSection.value = section.name;
+  el.pdSection.onchange = () => {
+    pdSectionName = el.pdSection.value;
+    pdChannel = null;
+    renderPartDetails();
+  };
+
+  el.pdPart.textContent = '';
+  el.pdPart.append(...section.parts.map((p) => {
+    const o = document.createElement('option');
+    o.value = String(p.channel);
+    o.textContent = t('part_option', { label: p.name, ch: p.channel + 1 });
+    return o;
+  }));
+  el.pdPart.value = String(part.channel);
+  el.pdPart.onchange = () => {
+    pdChannel = Number(el.pdPart.value);
+    renderPartDetails();
+  };
+
+  el.pdFields.textContent = '';
+  for (const spec of PD_FIELDS) {
+    const current = pdRead(part, spec);
+    const pick = (raw) => stageFieldOp(section.name, part.channel, spec, raw);
+    if (spec.kind === 'channel') {
+      el.pdFields.append(pdSelect(t(spec.label), `pd-${spec.field}`,
+        Array.from({ length: 16 }, (_, i) => [i, `ch ${i + 1}`]), current ?? 0, (v) => pick(Number(v))));
+    } else if (spec.kind === 'pitchclass') {
+      el.pdFields.append(pdSelect(t(spec.label), `pd-${spec.field}`,
+        NOTE_CLASSES.map((n, i) => [i, n]), current ?? 0, (v) => pick(Number(v))));
+    } else if (spec.kind === 'chordtype') {
+      el.pdFields.append(pdSelect(t(spec.label), `pd-${spec.field}`,
+        CHORD_TYPES.map((n, i) => [i, n]), current ?? 0, (v) => pick(Number(v))));
+    } else if (spec.kind === 'retrigger') {
+      el.pdFields.append(pdSelect(t(spec.label), `pd-${spec.field}`,
+        RETRIGGER_RULES.map((n, i) => [i, n]), current ?? 0, (v) => pick(Number(v))));
+    } else {
+      el.pdFields.append(pdNumber(t(spec.label), `pd-${spec.field}`, current ?? 0, 0, 127, pick));
+    }
+  }
+
+  const staged = state.casmOps.filter((o) => o.op === 'field').length;
+  el.pdSummary.textContent = staged ? t('pdet_staged', { n: staged }) : '';
 }
 
 /**
@@ -879,14 +1060,15 @@ function refreshVariations() {
 function stageCasm(operation) {
   if (!state) return;
 
-  if (operation.op === 'channel') {
-    // One operation per cell, holding the state the user asked for. Appending
-    // instead would make a second click on the same dot a second operation rather
-    // than a reversal, and - worse - switching off a part that was already on by
-    // default would store "off" as if it were an edit, when the file already says
-    // off and there is nothing to write.
+  if (operation.op === 'channel' || operation.op === 'field') {
+    // One operation per cell (or per field), holding the state the user asked
+    // for. Appending instead would make a second click on the same dot a second
+    // operation rather than a reversal, and - worse - switching off a part that
+    // was already on by default would store "off" as if it were an edit, when
+    // the file already says off and there is nothing to write.
     const at = state.casmOps.findIndex(
-      (o) => o.op === 'channel' && o.section === operation.section && o.channel === operation.channel,
+      (o) => o.op === operation.op && o.section === operation.section && o.channel === operation.channel
+        && (o.op === 'channel' || o.field === operation.field),
     );
     if (at >= 0) state.casmOps[at] = operation;
     else state.casmOps.push(operation);
@@ -912,12 +1094,15 @@ function pruneCasmOps() {
   const original = parseCasm(state.buffer);
   if (!original) return;
   state.casmOps = state.casmOps.filter((op) => {
-    if (op.op !== 'channel') return true;
+    if (op.op !== 'channel' && op.op !== 'field') return true;
     const section = original.sections.find((s) => s.name === op.section);
     // A cell whose section has been renamed or deleted cannot be compared, so it
     // is kept and left for the writer to resolve.
     if (!section) return true;
-    return section.channels.includes(op.channel) !== op.on;
+    if (op.op === 'channel') return section.channels.includes(op.channel) !== op.on;
+    const part = section.parts.find((p) => p.channel === op.channel);
+    if (!part) return true;
+    return pdDiffers(part, op.field, op.value);
   });
 }
 
@@ -930,9 +1115,9 @@ function renderMeta() {
   const used = s.rows.map((r) => `ch${r.channel + 1}`).join(', ');
   el.fileName.textContent = s.name;
   el.fileMeta.textContent =
-    `${s.version}${s.container === 'bare-smf' ? ' (no SFF container)' : ''} \u00b7 ${formatBytes(s.buffer.byteLength)} \u00b7 ` +
-    `${s.payloads.map((p) => p.kind).join(' + ')} \u00b7 ${s.notes.length} notes \u00b7 ${bpm.toFixed(1)} BPM \u00b7 ` +
-    `${s.meter.numerator}/${s.meter.denominator} \u00b7 ${s.meter.bars} bars \u00b7 ${secs.toFixed(1)}s \u00b7 ${used}`;
+    `${s.version}${s.container === 'bare-smf' ? ` (${t('filemeta_nocontainer')})` : ''} \u00b7 ${formatBytes(s.buffer.byteLength)} \u00b7 ` +
+    `${s.payloads.map((p) => p.kind).join(' + ')} \u00b7 ${cnt(s.notes.length, 'note')} \u00b7 ${bpm.toFixed(1)} BPM \u00b7 ` +
+    `${s.meter.numerator}/${s.meter.denominator} \u00b7 ${cnt(s.meter.bars, 'bar')} \u00b7 ${t('clock_s', { s: secs.toFixed(1) })} \u00b7 ${used}`;
 }
 
 function renderTimeline() {
@@ -955,14 +1140,14 @@ function renderTimeline() {
     d.className = 'tl-block';
     d.style.flex = String(Math.max(1, v.bars));
     d.textContent = v.bars >= 3 ? v.name : '';
-    d.title = `${v.name}: ${v.bars} bar(s), ${v.notes} note(s)`;
+    d.title = t('vv_tl_title', { name: v.name, bars: cnt(v.bars, 'bar'), notes: cnt(v.notes, 'note') });
     blockWrap.append(d);
   }
   if (marked.length === 0) {
     const d = document.createElement('div');
     d.className = 'tl-block';
     d.style.flex = '1';
-    d.textContent = state.notes.length ? 'no variation markers' : 'no notes';
+    d.textContent = state.notes.length ? t('tl_no_markers') : t('editor_hint_nonotes');
     blockWrap.append(d);
   }
   ruler.append(blockWrap);
@@ -975,7 +1160,7 @@ function renderTimeline() {
     const name = document.createElement('div');
     name.className = 'tl-name';
     name.textContent = r.label;
-    name.title = `Channel ${r.channel + 1}`;
+    name.title = t('voice_channel', { ch: r.channel + 1 });
     const lanes = document.createElement('div');
     lanes.className = 'tl-lanes';
     const counts = s.presence.get(r.channel) ?? [];
@@ -988,7 +1173,7 @@ function renderTimeline() {
         c.classList.add('on');
         c.style.setProperty('--lane', laneColor(r.family));
         c.style.setProperty('--a', String(0.3 + 0.7 * Math.min(1, n / peak)));
-        c.title = `Bar ${bar + 1}: ${n} note(s)`;
+        c.title = t('tl_cell', { b: bar + 1, n: cnt(n, 'note') });
       }
       lanes.append(c);
     }
@@ -999,17 +1184,17 @@ function renderTimeline() {
   const inferred = false;
   const notes = [
     s.variations?.length
-      ? `${s.variations.length} variations, read from the file's markers.`
-      : 'This file carries no variation markers, so the blocks above are inferred from where the parts change.',
-    s.meter.source === BLOCK_SOURCE.inferred && s.meter.note ? `Grid uses 4/4: ${s.meter.note}.` : '',
+      ? t('tl_from_markers', { n: cnt(s.variations.length, 'variation') })
+      : t('tl_inferred'),
+    s.meter.source === BLOCK_SOURCE.inferred && s.meter.decl ? t('tl_grid44', { note: t('tl_meter_sub', { decl: s.meter.decl }) }) : '',
   ].filter(Boolean).join(' ');
-  el.timelineHint.textContent = notes || `${bars} bars`;
+  el.timelineHint.textContent = notes || cnt(bars, 'bar');
 }
 
 function renderVoices() {
   el.voices.textContent = '';
   if (state.rows.length === 0) {
-    el.voices.innerHTML = '<p class="empty">No parts found.</p>';
+    el.voices.innerHTML = `<p class="empty">${t('nl_no_parts')}</p>`;
     return;
   }
   const busiest = Math.max(...state.rows.map((x) => x.count));
@@ -1025,10 +1210,14 @@ function renderVoices() {
     const avg = r.velSum / r.count;
     row.innerHTML =
       `<div class="voice-name"><span>${esc(r.label)}</span></div>` +
-      `<div class="voice-ch">ch ${r.channel + 1}</div>` +
-      `<div class="voice-pitch">${noteName(r.low)}\u2013${noteName(r.high)}<div class="bar-mini"><i style="width:${Math.min(100, (r.count / busiest) * 100).toFixed(0)}%"></i></div></div>` +
-      `<div class="voice-vel">vel <b>${r.velMin}\u2013${r.velMax}</b> \u00b7 avg ${avg.toFixed(0)}</div>`;
+      `<div class="voice-ch">${t('voice_ch', { ch: r.channel + 1 })}</div>` +
+      `<div class="voice-pitch">${noteName(r.low)}–${noteName(r.high)}<div class="bar-mini"><i></i></div></div>` +
+      `<div class="voice-vel">${t('voice_vel_avg', { lo: r.velMin, hi: r.velMax, avg: avg.toFixed(0) })}</div>`;
     el.voices.append(row);
+    // The mini bar width is a value, not markup: set it through the CSSOM so
+    // the HTML carries no style="" attribute.
+    const mini = row.querySelector('.bar-mini i');
+    if (mini) mini.style.width = `${Math.min(100, (r.count / busiest) * 100).toFixed(0)}%`;
   }
 }
 
@@ -1043,16 +1232,14 @@ function renderDeclared() {
   for (const name of s.structure.declaredSections) {
     const tag = document.createElement('span');
     tag.className = 'decl-tag';
-    tag.innerHTML = `<b>${esc(sectionLabel(name))}</b> ${esc(name)}`;
+    tag.innerHTML = `<b>${esc(t(secKey(sectionLabel(name))))}</b> ${esc(name)}`;
     el.declared.append(tag);
   }
   const notice = document.createElement('p');
   notice.className = 'notice';
-  notice.textContent =
-    'These names come from the original style. This export stores no section boundaries in time, ' +
-    'so the notes above cannot be split per section - they are grouped by part.';
+  notice.textContent = t('declared_notice');
   el.declared.append(notice);
-  el.declaredHint.textContent = `declared by the style \u00b7 ${s.structure.declaredSections.length} sections`;
+  el.declaredHint.textContent = t('declared_by', { n: cnt(s.structure.declaredSections.length, 'section') });
 }
 
 // ---- summary ----------------------------------------------------------------
@@ -1075,13 +1262,13 @@ function refresh() {
   const mapChanges = state.casmOps.length;
   el.btnRevert.disabled = total === 0 && mapChanges === 0 && state.bulkVelocity === null;
   el.editCount.textContent = total === 0 && mapChanges === 0 && state.bulkVelocity === null
-    ? 'No pending edits'
+    ? t('ec_none')
     : [
-      mapChanges ? `${mapChanges} map` : null,
-      state.added.length ? `${state.added.length} added` : null,
-      state.removed.size ? `${state.removed.size} removed` : null,
-      state.pendingVelocity.size ? `${state.pendingVelocity.size} velocity` : null,
-      state.pendingShape.size ? `${state.pendingShape.size} pitch/length` : null,
+      mapChanges ? t('ec_map', { n: mapChanges }) : null,
+      state.added.length ? t('ec_added', { n: state.added.length }) : null,
+      state.removed.size ? t('ec_removed', { n: state.removed.size }) : null,
+      state.pendingVelocity.size ? t('ec_velocity', { n: state.pendingVelocity.size }) : null,
+      state.pendingShape.size ? t('ec_pitch', { n: state.pendingShape.size }) : null,
     ].filter(Boolean).join(' \u00b7 ');
 
   // The selection, not the part on screen: the bulk controls and the download
@@ -1091,11 +1278,11 @@ function refresh() {
     && chosen.some((n) => (pendingVelocityOf(n) ?? n.velocity) !== clampVelocity(v));
   el.btnDownload.disabled = chosen.length === 0 && total === 0 && !bulkWrites && mapChanges === 0;
   el.saveHint.textContent = mapChanges
-    ? `${mapChanges} variation-map change${mapChanges === 1 ? '' : 's'} will be written into the download`
-    : 'Your original file is never modified';
+    ? t('save_map_write', { n: cnt(mapChanges, 'change') })
+    : t('save_hint_default');
 
   if (chosen.length === 0) {
-    el.summary.innerHTML = '<b>No notes match</b> - include a part or widen the pitch range.';
+    el.summary.innerHTML = `<b>${t('summary_no_match')}</b> - ${t('summary_no_match_hint')}`;
     return;
   }
   const distinct = [...new Set(chosen.map((n) => n.note))].sort((a, b) => a - b);
@@ -1104,11 +1291,11 @@ function refresh() {
   const changed = now.filter((x, i) => x !== orig[i]).length;
   const parts = [...new Set(chosen.map((n) => n.channel))].length;
   const preview = distinct.slice(0, 12).map((n) => noteName(n)).join(', ');
-  const more = distinct.length > 12 ? ` +${distinct.length - 12} more` : '';
+  const more = distinct.length > 12 ? t('sum_more', { n: distinct.length - 12 }) : '';
   el.summary.innerHTML =
-    `<b>${chosen.length}</b> notes in <b>${parts}</b> part(s), ${distinct.length} pitches (${preview}${more})<br>` +
-    `Velocity now ${Math.min(...now)}\u2013${Math.max(...now)}, avg ${(now.reduce((a, b) => a + b, 0) / now.length).toFixed(1)} ` +
-    `(was ${Math.min(...orig)}\u2013${Math.max(...orig)}) \u00b7 ${changed} changed.`;
+    t('sum_line1', { n: `<b>${chosen.length}</b>`, parts: `<b>${cnt(parts, 'part')}</b>`, pitches: cnt(distinct.length, 'pitch'), preview, more }) +
+    t('sum_line2', { lo: Math.min(...now), hi: Math.max(...now), avg: (now.reduce((a, b) => a + b, 0) / now.length).toFixed(1), wlo: Math.min(...orig), whi: Math.max(...orig), changed: changed }) +
+    '';
 }
 
 // ---- operations -------------------------------------------------------------
@@ -1117,7 +1304,7 @@ function runOperation(kind) {
   if (!state) return;
   const notes = editableNotes();
   if (!notes.length) {
-    say('No notes in this part and pitch range.', 'warn');
+    say(t('no_notes_range'), 'warn');
     return;
   }
   // Curve is positional, so it needs each note's place in the part's span.
@@ -1145,8 +1332,19 @@ function runOperation(kind) {
   }
   draw();
   refresh();
-  say(`${kind} applied to ${notes.length} notes in ${state.rows.find((r) => r.channel === state.activeChannel)?.label ?? 'this part'}.`, 'ok');
+  say(t('op_applied', { kind: t(OP_LABEL_KEY[kind] ?? kind), n: cnt(notes.length, 'note'), part: state.rows.find((r) => r.channel === state.activeChannel)?.label ?? t('this_part') }), 'ok');
 }
+
+/** Bulk-operation kind to its dictionary label key (see ops_* in i18n.js). */
+const OP_LABEL_KEY = {
+  set: 'ops_set',
+  scale: 'ops_scale',
+  offset: 'ops_offset',
+  humanize: 'ops_humanize',
+  random: 'ops_random',
+  curve: 'ops_curve',
+  accent: 'ops_accent',
+};
 
 /** A seeded generator, so "humanize" is reproducible and can be undone by re-running. */
 function mulberry32(seed) {
@@ -1231,7 +1429,7 @@ function buildEdited() {
 
       const clashes = findCollisions(entry.parsed, edits);
       if (clashes.length) {
-        say(`${clashes.length} note pair(s) now overlap on the same pitch. Saving anyway \u2014 check the result in an arranger.`, 'warn');
+        say(t('clash_warn', { n: cnt(clashes.length, 'pair') }), 'warn');
       }
       buffer = applyEdits(buffer, entry.descriptor, entry.parsed, edits);
     }
@@ -1244,14 +1442,14 @@ function buildEdited() {
       casm = parseCasm(buffer);
     } catch (err) {
       casm = null;
-      say(`The variation map could not be read, so the map changes were left out: ${err.message}`, 'warn');
+      say(t('map_leftout', { err: err.message }), 'warn');
     }
     if (!casm) {
-      say('This file has no variation map, so the map changes cannot be written.', 'warn');
+      say(t('no_map_write'), 'warn');
     } else {
       const applied = applyCasmOperations(casm, state.casmOps);
       if (!applied.ok) {
-        say(`Stopped before writing: ${applied.reason}`, 'warn');
+        say(t('stopped_reason', { reason: applied.reason }), 'warn');
       } else {
         buffer = writeCasm(buffer, casm);
       }
@@ -1317,7 +1515,7 @@ function writePresets(list) {
   try {
     localStorage.setItem(PRESET_KEY, JSON.stringify(list));
   } catch {
-    say('Could not write to this browser\u2019s local storage, so presets will not persist.', 'warn');
+    say(t('storage_denied'), 'warn');
   }
 }
 
@@ -1325,7 +1523,10 @@ function renderPresets() {
   const list = readPresets();
   el.presetList.textContent = '';
   if (!list.length) {
-    el.presetList.innerHTML = '<p class="empty">No presets saved yet.</p>';
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = t('preset_empty');
+    el.presetList.append(empty);
     return;
   }
   for (const preset of list) {
@@ -1334,12 +1535,12 @@ function renderPresets() {
     const apply = document.createElement('button');
     apply.className = 'btn btn-sm';
     apply.textContent = preset.name;
-    apply.title = `${preset.velocity?.size ?? 0} velocity, ${preset.shape?.length ?? 0} pitch/length`;
+    apply.title = t('preset_title', { v: preset.velocity?.size ?? 0, s: preset.shape?.length ?? 0 });
     apply.addEventListener('click', () => applyPreset(preset));
     const drop = document.createElement('button');
     drop.className = 'btn btn-sm btn-ghost';
     drop.textContent = '\u00d7';
-    drop.title = 'Delete';
+    drop.title = t('mv_delete');
     drop.addEventListener('click', () => {
       writePresets(readPresets().filter((p) => p.name !== preset.name));
       renderPresets();
@@ -1355,12 +1556,12 @@ function applyPreset(preset) {
   state.pendingShape = new Map(preset.shape ?? []);
   state.bulkVelocity = null;
   setActivePart(state.activeChannel);
-  say(`Applied preset "${preset.name}".`, 'ok');
+  say(t('preset_applied', { name: preset.name }), 'ok');
 }
 
 function savePreset() {
   if (!state) return;
-  const name = el.presetName.value.trim() || `preset ${readPresets().length + 1}`;
+  const name = el.presetName.value.trim() || t('preset_default_name', { n: readPresets().length + 1 });
   const list = readPresets().filter((p) => p.name !== name);
   list.push({
     name,
@@ -1373,7 +1574,7 @@ function savePreset() {
   writePresets(list);
   el.presetName.value = '';
   renderPresets();
-  say(`Saved preset "${name}" to this browser.`, 'ok');
+  say(t('preset_saved', { name }), 'ok');
 }
 
 // ---- playback ---------------------------------------------------------------
@@ -1420,16 +1621,16 @@ async function play(usePreview, fromTick = 0, region = null) {
     region?.loop ?? false);
   player.setCountIn(region?.countIn ?? 0, state.tpb);
   player.onEnded = () => {
-    el.btnPlay.textContent = PLAY_LABEL;
-    el.btnPlayVariation.textContent = 'Play variation';
+    el.btnPlay.textContent = PLAY_LABEL();
+    el.btnPlayVariation.textContent = t('btn_play_var');
     cancelAnimationFrame(rafId);
     roll?.setPlayhead(null);
     lane?.setPlayhead(null);
     draw();
   };
   player.start(fromTick);
-  el.btnPlay.textContent = PAUSE_LABEL;
-  if (region) el.btnPlayVariation.textContent = 'Stop variation';
+  el.btnPlay.textContent = PAUSE_LABEL();
+  if (region) el.btnPlayVariation.textContent = t('btn_stop_var');
   tickPlayhead();
 }
 
@@ -1454,21 +1655,21 @@ function playheadTick() {
 
 function stopPlayback() {
   player?.stop();
-  el.btnPlay.textContent = PLAY_LABEL;
-  el.btnPlayVariation.textContent = 'Play variation';
+  el.btnPlay.textContent = PLAY_LABEL();
+  el.btnPlayVariation.textContent = t('btn_play_var');
   cancelAnimationFrame(rafId);
   const ph = document.querySelector('.tl-playhead');
   ph?.remove();
   roll?.setPlayhead(null);
   lane?.setPlayhead(null);
   if (state) draw();
-  el.clock.textContent = '0.0s';
+  el.clock.textContent = t('clock_s', { s: '0.0' });
 }
 
 function tickPlayhead() {
   if (!player?.playing || !state) return;
   const secs = player.position();
-  el.clock.textContent = `${secs.toFixed(1)}s`;
+  el.clock.textContent = t('clock_s', { s: secs.toFixed(1) });
 
   const tick = playheadTick();
   roll?.setPlayhead(tick);
@@ -1506,6 +1707,27 @@ el.btnReset.addEventListener('click', () => {
   el.panelEdit.classList.add('hidden');
   el.panelLoad.classList.remove('hidden');
   say('');
+});
+
+// Interface language: Arabic by default, English one click away in the
+// header. Static chrome swaps first, then the whole view re-renders so every
+// dynamic string follows. The choice persists in this browser.
+initLang();
+applyI18n(document);
+el.btnLang?.addEventListener('click', () => {
+  setLang(getLang() === 'ar' ? 'en' : 'ar');
+  // Static chrome already swapped inside setLang; re-render the dynamic
+  // regions so they follow. Nothing is loaded yet before the first file.
+  if (!state) return;
+  refresh();
+  renderMap();
+  renderVariations();
+  renderLift();
+  renderMeta();
+  renderTimeline();
+  renderVoices();
+  renderDeclared();
+  renderPresets();
 });
 
 el.voices.addEventListener('click', (e) => {
@@ -1551,7 +1773,7 @@ el.btnRevert.addEventListener('click', () => {
   state.bulkVelocity = null;
   renderMap();
   setActivePart(state.activeChannel);
-  say('Pending edits discarded. The file in memory is untouched.', 'ok');
+  say(t('edits_discarded'), 'ok');
 });
 
 el.btnCopyMap.addEventListener('click', async () => {
@@ -1559,7 +1781,7 @@ el.btnCopyMap.addEventListener('click', async () => {
   const text = mapView.toText();
   try {
     await navigator.clipboard.writeText(text);
-    say('The variation map is on the clipboard.', 'ok');
+    say(t('map_copied'), 'ok');
   } catch {
     // Clipboard access needs a secure context and permission; a download always
     // works, so offer that rather than failing silently.
@@ -1608,7 +1830,7 @@ async function playVariation() {
   const variations = state?.variations ?? [];
   const v = variations[Number(el.playVariation.value)];
   if (!v) {
-    say('This file records no variation markers, so there is no single variation to play.', 'warn');
+    say(t('no_markers_play'), 'warn');
     return;
   }
   // Always starts at the variation. The "preview edit" switch decides which values
@@ -1620,10 +1842,10 @@ async function playVariation() {
     loop: el.playLoop.checked,
     countIn: Number(el.playCountIn.value),
   });
-  el.btnPlay.textContent = 'Playing variation';
-  say(`Playing ${v.name}${el.playLoop.checked ? ', repeating' : ''}`
-    + `${Number(el.playCountIn.value) ? ` with ${el.playCountIn.value} bar count-in` : ''}.`
-    + ' Press Stop to end it.', 'ok');
+  el.btnPlay.textContent = t('btn_playing_var');
+  say((el.playLoop.checked ? t('playing_var_rep', { v: v.name }) : t('playing_var', { v: v.name }))
+    + (Number(el.playCountIn.value) ? ` ${t('playing_var_countin', { n: cnt(Number(el.playCountIn.value), 'bar') })}` : '')
+    + `. ${t('playing_var_stop')}`, 'ok');
 }
 
 // Every control in that row has to reach the engine, not just the variation: the
@@ -1639,11 +1861,11 @@ el.btnPlay.addEventListener('click', () => {
     stopPlayback();
     return;
   }
-  play(true).catch((err) => say(`Playback failed: ${err?.message ?? err}`, 'warn'));
+  play(true).catch((err) => say(t('playback_failed', { err: err?.message ?? err }), 'warn'));
 });
 el.btnStop.addEventListener('click', stopPlayback);
 el.btnPlayOriginal.addEventListener('click', () =>
-  play(false).catch((err) => say(`Playback failed: ${err?.message ?? err}`, 'warn')),
+  play(false).catch((err) => say(t('playback_failed', { err: err?.message ?? err }), 'warn')),
 );
 el.speed.addEventListener('change', () => player?.setSpeed(Number(el.speed.value)));
 el.volume.addEventListener('input', () => { if (player) player.master.gain.value = Number(el.volume.value) / 100; });
@@ -1663,10 +1885,10 @@ el.btnDownload.addEventListener('click', () => {
     // Saying "velocity set to 100" when nothing was pending would be a lie the
     // user could check by loading the file and hearing no difference.
     say(parts.length
-      ? `Wrote ${parts.join(' and ')} into ${editedName()}.`
-      : `No changes to write, so ${editedName()} is a copy of the original.`, 'ok');
+      ? t('wrote_into', { parts: parts.join(' and '), file: editedName() })
+      : t('no_changes_copy', { file: editedName() }), 'ok');
   } catch (err) {
-    say(`Could not write the file: ${err?.message ?? err}`, 'warn');
+    say(t('write_failed', { err: err?.message ?? err }), 'warn');
   }
 });
 el.btnDownloadOrig.addEventListener('click', () => state && download(state.buffer.slice(0), state.name));
@@ -1699,7 +1921,7 @@ el.btnJsonExport.addEventListener('click', () => {
   a.download = state.name.replace(/\.sty$/i, '') + '-edits.json';
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
-  say(`Exported ${payload.notes.length} edited note(s) as JSON.`, 'ok');
+  say(t('exported_n', { n: cnt(payload.notes.length, 'note') }), 'ok');
 });
 
 el.btnJsonImport.addEventListener('click', () => el.jsonFile.click());
@@ -1727,9 +1949,9 @@ el.jsonFile.addEventListener('change', async (e) => {
       }
     }
     setActivePart(state.activeChannel);
-    say(`Imported ${hits} of ${(data.notes ?? []).length} entries from JSON.`, hits ? 'ok' : 'warn');
+    say(t('imported_of', { hits, total: (data.notes ?? []).length }), hits ? 'ok' : 'warn');
   } catch (err) {
-    say(`Could not read that JSON: ${err?.message ?? err}`, 'warn');
+    say(t('json_unreadable', { err: err?.message ?? err }), 'warn');
   } finally {
     el.jsonFile.value = '';
   }

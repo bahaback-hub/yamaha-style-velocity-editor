@@ -16,6 +16,7 @@ import { indexNotes, indexTracksOnly } from '../src/smf.js';
 const OUT = 'C:/Users/DSER/AppData/Local/Temp/opencode/sty-e2e';
 mkdirSync(OUT, { recursive: true });
 const BASE = `http://localhost:${process.env.PORT ?? '5173'}/`;
+const BASE_EN = BASE + '?lang=en'; // existing assertions match English strings
 
 function track(events) {
   const len = events.length;
@@ -85,7 +86,7 @@ const check = (name, ok, detail = '') => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
-await page.goto(BASE, { waitUntil: 'load' });
+await page.goto(BASE_EN, { waitUntil: 'load' });
 check('page loads without JS errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 check('edit panel hidden before load', await page.locator('#panelEdit').isHidden());
 

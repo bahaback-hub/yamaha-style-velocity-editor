@@ -19,9 +19,10 @@
  *   onRename?: (sectionName: string, name: string) => void,
  *   onRemove?: (sectionName: string) => void,
  *   onClone?: (sectionName: string) => void,
- *   editable?: boolean,
+ *   editable?: boolean
  * }} handlers
  */
+import { t, cnt } from './i18n.js';
 export class MapView {
   constructor(root, handlers = {}) {
     this.root = root;
@@ -46,7 +47,10 @@ export class MapView {
     this.root.textContent = '';
 
     if (!casm || casm.sections.length === 0) {
-      this.root.innerHTML = '<p class="empty">This file declares no variations.</p>';
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = t('mv_empty_novars');
+      this.root.append(empty);
       return;
     }
     // The grid template needs to know how many part columns there are, and it has
@@ -61,7 +65,7 @@ export class MapView {
     const row = document.createElement('div');
     row.className = 'map-row map-head';
     row.append(Object.assign(document.createElement('div'), {
-      className: 'map-name', textContent: 'Variation',
+      className: 'map-name', textContent: t('mv_col_variation'),
     }));
     for (const part of this.parts) {
       const cell = document.createElement('div');
@@ -72,8 +76,8 @@ export class MapView {
       // worth saying out loud, because "which part is this" stops having a single
       // answer.
       cell.title = rest.length
-        ? `ch ${part.channel + 1} · named ${part.names.join(' / ')} · in ${part.sections} variation(s)`
-        : `ch ${part.channel + 1} · in ${part.sections} variation(s)`;
+        ? t('mv_cell_named', { ch: part.channel + 1, names: part.names.join(' / '), n: cnt(part.sections, 'variation') })
+        : t('mv_cell_plain', { ch: part.channel + 1, n: cnt(part.sections, 'variation') });
       if (rest.length) cell.classList.add('multi');
       row.append(cell);
     }
@@ -102,7 +106,7 @@ export class MapView {
     name.append(label);
     if (section.channels.length === 0) {
       const empty = document.createElement('em');
-      empty.textContent = 'no parts';
+      empty.textContent = t('mv_no_parts');
       name.append(empty);
     }
     row.append(name);
@@ -133,10 +137,10 @@ export class MapView {
     button.setAttribute('aria-pressed', String(on));
     const name = this.#partNameIn(section, part);
     button.setAttribute('aria-label',
-      `${part.channel + 1} ${name} in ${section.name}: ${on ? 'on' : 'off'}`);
+      t('mv_dot_aria', { ch: part.channel + 1, part: name, section: section.name, state: on ? t('mv_on') : t('mv_off') }));
     button.title = on
-      ? `${name} plays in ${section.name} — click to switch it off`
-      : `${name} does not play in ${section.name} — click to switch it on`;
+      ? t('mv_dot_on_title', { part: name, section: section.name })
+      : t('mv_dot_off_title', { part: name, section: section.name });
     button.disabled = !this.editable;
     button.addEventListener('click', () => {
       if (!this.editable) return;
@@ -159,10 +163,10 @@ export class MapView {
     const rename = document.createElement('button');
     rename.type = 'button';
     rename.className = 'map-btn';
-    rename.textContent = 'Rename';
+    rename.textContent = t('mv_rename');
     rename.disabled = !this.editable;
     rename.addEventListener('click', () => {
-      const next = window.prompt(`Name this variation:`, section.name);
+      const next = window.prompt(t('mv_prompt_name'), section.name);
       if (next && next.trim() && next.trim() !== section.name) {
         this.handlers.onRename?.(section.name, next.trim());
       }
@@ -171,19 +175,19 @@ export class MapView {
     const clone = document.createElement('button');
     clone.type = 'button';
     clone.className = 'map-btn';
-    clone.textContent = 'Copy';
-    clone.title = 'Add a new variation with the same parts, then edit it';
+    clone.textContent = t('mv_copy');
+    clone.title = t('mv_copy_title');
     clone.disabled = !this.editable;
     clone.addEventListener('click', () => this.handlers.onClone?.(section.name));
 
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'map-btn map-btn-warn';
-    remove.textContent = 'Delete';
-    remove.title = 'Remove this variation from the file';
+    remove.textContent = t('mv_delete');
+    remove.title = t('mv_delete_title');
     remove.disabled = !this.editable;
     remove.addEventListener('click', () => {
-      if (window.confirm(`Delete "${section.name}" from this file?`)) {
+      if (window.confirm(t('mv_confirm_delete', { name: section.name }))) {
         this.handlers.onRemove?.(section.name);
       }
     });
@@ -201,9 +205,9 @@ export class MapView {
     if (!this.casm) return '';
     const width = Math.max(4, ...this.parts.map((p) => (p.names[0] ?? '').length));
     const lines = [
-      `${this.casm.sections.length} variations, ${this.parts.length} parts`,
+      t('mv_total_line', { vars: cnt(this.casm.sections.length, 'variation'), parts: cnt(this.parts.length, 'part') }),
       '',
-      ['Variation'.padEnd(11), ...this.parts.map((p) => (p.names[0] ?? '').padEnd(width))].join(' '),
+      [t('mv_col_variation').padEnd(11), ...this.parts.map((p) => (p.names[0] ?? '').padEnd(width))].join(' '),
     ];
     for (const section of this.casm.sections) {
       lines.push([
@@ -226,12 +230,11 @@ export class MapView {
  * @returns {{text: string, complete: boolean}}
  */
 export function describeMap(casm) {
-  if (!casm || casm.sections.length === 0) return { text: 'No variation map in this file.', complete: false };
+  if (!casm || casm.sections.length === 0) return { text: t('mv_map_none'), complete: false };
   const n = casm.sections.length;
-  if (n >= 15) return { text: `All ${n} variations are declared.`, complete: true };
+  if (n >= 15) return { text: t('mv_map_all', { n: cnt(n, 'variation') }), complete: true };
   return {
-    text: `This file declares ${n} variation${n === 1 ? '' : 's'}, not the full fifteen. `
-      + 'The others were never written into it, so they cannot be edited here.',
+    text: t('mv_map_partial', { n: cnt(n, 'variation') }),
     complete: false,
   };
 }

@@ -1,27 +1,28 @@
 <!doctype html>
-<html lang="en">
+<html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Yamaha Style Editor — velocity, pitch and length in a .STY</title>
-<meta name="description" content="Inspect and edit drum-note velocity, pitch and length inside Yamaha .STY style files, with a piano roll and playback. Runs entirely in your browser." />
+<title data-i18n="doc_title">محرر ستايلات ياماها — السرعة والنغمة والطول في ملف .STY</title>
+<meta name="description" data-i18n="doc_desc" content="افحص وعدّل سرعة النوتات ونغمتها وطولها داخل ملفات ستايلات ياماها .STY، مع بيانو رول وتشغيل. يعمل كاملاً في متصفحك." />
 <link rel="stylesheet" href="src/app.css" />
 </head>
 <body>
 <div class="app">
   <header class="bar">
-    <h1>Style Editor</h1>
-    <p class="tag">Yamaha .STY &middot; piano roll, velocity, length &middot; nothing leaves this device</p>
+    <h1 data-i18n="app_title">محرر الستايل</h1>
+    <p class="tag" data-i18n="app_tag">ياماها .STY · بيانو رول وسرعة وطول · لا شيء يغادر جهازك</p>
+    <button class="btn btn-ghost btn-sm" id="btnLang" data-i18n="lang_btn" title="Language / اللغة">EN</button>
   </header>
 
   <!-- Load -->
   <section class="panel" id="panelLoad">
     <label class="drop" id="drop">
       <input type="file" id="file" accept=".sty,.STY,.mid,.MID" hidden />
-      <strong>Drop a .STY file here</strong>
-      <span>or click to browse</span>
+      <strong data-i18n="drop_title">أفلت ملف .STY هنا</strong>
+      <span data-i18n="drop_sub">أو انقر للتصفح</span>
     </label>
-    <p class="note">Read locally with the File API. No upload, no server, no network request after load.</p>
+    <p class="note" data-i18n="drop_note">يُقرأ محلياً عبر المتصفح. لا رفع، لا خادم، لا اتصال بعد التحميل.</p>
   </section>
 
   <!-- Edit -->
@@ -31,35 +32,47 @@
         <div class="filename" id="fileName">&mdash;</div>
         <div class="meta" id="fileMeta"></div>
       </div>
-      <button class="btn btn-ghost" id="btnReset">Change file</button>
+      <button class="btn btn-ghost" id="btnReset" data-i18n="change_file">تغيير الملف</button>
     </div>
 
     <!-- Section map: the first thing on the page, because it is the answer to
          "what is actually stored in this style". -->
     <div class="block block-map" id="blockMap">
       <div class="block-head">
-        <h2>Variation map</h2>
+        <h2 data-i18n="map_title">خريطة الفابوريشنات</h2>
         <span class="hint" id="mapHint"></span>
       </div>
-      <p class="hint map-legend">
-        A dot means that part sounds in that variation. Click a dot to switch the
-        part on or off for that variation alone. Copy duplicates a variation so you
-        can build a new one from a starting point.
+      <p class="hint map-legend" data-i18n="map_legend">
+        النقطة تعني أن هذا الصوت يعمل في هذا الفابوريشن. انقر النقطة لتشغيل الصوت أو إيقافه لهذا الفابوريشن وحده. النسخ يكرر الفابوريشن لتبني واحداً جديداً من نقطة بداية.
       </p>
       <div class="map" id="map"></div>
       <div class="summary" id="mapSummary"></div>
     </div>
 
+    <!-- Part details: the Ctb2 fields behind one map cell, editable -->
+    <div class="block hidden" id="blockPartDetails">
+      <div class="block-head">
+        <h2 data-i18n="pdet_title">Part details</h2>
+        <span class="hint" data-i18n="pdet_hint">One part in one variation — changes stage like the map dots and write on download</span>
+      </div>
+      <div class="field narrow">
+        <label for="pdSection" data-i18n="pvary_variation">الفابوريشن</label>
+        <select id="pdSection"></select>
+        <label for="pdPart" data-i18n="ed_part">الصوت</label>
+        <select id="pdPart"></select>
+      </div>
+      <div class="field narrow" id="pdFields"></div>
+      <p class="hint" id="pdSummary"></p>
+    </div>
+
     <!-- What plays when, read from the file's markers -->
     <div class="block" id="blockVariations">
       <div class="block-head">
-        <h2>What plays when</h2>
+        <h2 data-i18n="varswhen_title">ماذا يعزف ومتى</h2>
         <span class="hint" id="variationsHint"></span>
       </div>
-      <p class="hint map-legend">
-        Each bar below is one variation, positioned and sized by where the file
-        says it starts and ends. A tick means the parts that sounded during it
-        match what the map declares.
+      <p class="hint map-legend" data-i18n="varswhen_legend">
+        كل شريط بالأسفل فابوريشن واحد، موضوع ومقاس حسب ما يقوله الملف عن بدايته ونهايته. علامة الصح تعني أن الأصوات التي عزفت تطابق ما تعلنه الخريطة.
       </p>
       <div class="vars" id="vars"></div>
       <div class="summary" id="variationsSummary"></div>
@@ -68,18 +81,18 @@
     <!-- Lift one note's velocity everywhere -->
     <div class="block">
       <div class="block-head">
-        <h2>Lift one note</h2>
-        <span class="hint">Change every occurrence of one note, in one step</span>
+        <h2 data-i18n="lift_title">رفع نوتة</h2>
+        <span class="hint" data-i18n="lift_hint">غيّر كل تكرارات نوتة واحدة بخطوة واحدة</span>
       </div>
       <div class="lift" id="lift"></div>
     </div>
 
     <!-- Transport -->
     <div class="transport" role="group" aria-label="Playback">
-      <button class="btn btn-play" id="btnPlay" aria-label="Play">Play</button>
-      <button class="btn btn-ghost" id="btnStop" aria-label="Stop">Stop</button>
+      <button class="btn btn-play" id="btnPlay" aria-label="Play" data-i18n="play_btn" data-i18n-aria="play_btn">تشغيل</button>
+      <button class="btn btn-ghost" id="btnStop" aria-label="Stop" data-i18n="stop_btn" data-i18n-aria="stop_btn">إيقاف</button>
       <label class="inline">
-        Speed
+        <span data-i18n="speed_label">السرعة</span>
         <select id="speed">
           <option value="0.5">0.5&times;</option>
           <option value="0.75">0.75&times;</option>
@@ -89,39 +102,39 @@
         </select>
       </label>
       <label class="inline">
-        Volume
+        <span data-i18n="volume_label">الصوت</span>
         <input type="range" id="volume" min="0" max="100" value="80" />
       </label>
       <span class="clock" id="clock">0.0s</span>
-      <label class="check" title="Play the pending edit instead of the file's own values">
-        <input type="checkbox" id="previewEdit" checked /> Preview edit
+      <label class="check" data-i18n-title="preview_edit" title="معاينة التعديل">
+        <input type="checkbox" id="previewEdit" checked /> <span data-i18n="preview_edit">معاينة التعديل</span>
       </label>
-      <button class="btn btn-ghost" id="btnPlayOriginal">Audition original</button>
+      <button class="btn btn-ghost" id="btnPlayOriginal" data-i18n="audition_original">سماع الأصل</button>
     </div>
 
     <!-- Play one variation, on its own, as many times as you like -->
     <div class="block block-transport-variation" id="blockVariationPlay">
       <div class="block-head">
-        <h2>Play one variation</h2>
-        <span class="hint">The bars the file itself calls that variation</span>
+        <h2 data-i18n="pvary_title">تشغيل فابوريشن واحد</h2>
+        <span class="hint" data-i18n="pvary_hint">المقاطع التي يسميها الملف نفسه بهذا الفابوريشن</span>
       </div>
       <div class="vplay">
         <label class="inline">
-          Variation
+          <span data-i18n="pvary_variation">الفابوريشن</span>
           <select id="playVariation"></select>
         </label>
-        <label class="check" title="Start it again when it ends">
-          <input type="checkbox" id="playLoop" /> Repeat
+        <label class="check" data-i18n-title="pvary_repeat_title" title="إعادة التشغيل عند الانتهاء">
+          <input type="checkbox" id="playLoop" /> <span data-i18n="pvary_repeat">تكرار</span>
         </label>
         <label class="inline">
-          Count-in
+          <span data-i18n="pvary_countin">العدّ قبل البدء</span>
           <select id="playCountIn">
-            <option value="0" selected>None</option>
-            <option value="1">1 bar</option>
-            <option value="2">2 bars</option>
+            <option value="0" selected data-i18n="pvary_none">بدون</option>
+            <option value="1" data-i18n="pvary_1bar">بار واحد</option>
+            <option value="2" data-i18n="pvary_2bars">باران</option>
           </select>
         </label>
-        <button class="btn" id="btnPlayVariation">Play variation</button>
+        <button class="btn" id="btnPlayVariation" data-i18n="pvary_play">تشغيل الفابوريشن</button>
         <span class="hint" id="playVariationHint"></span>
       </div>
     </div>
@@ -129,19 +142,19 @@
     <!-- Editor -->
     <div class="block block-editor" id="blockEditor">
       <div class="block-head">
-        <h2>Editor</h2>
+        <h2 data-i18n="ed_title">المحرر</h2>
         <span class="hint" id="editorHint"></span>
       </div>
 
       <div class="editor-bar">
         <label class="inline">
-          Part
+          <span data-i18n="ed_part">الصوت</span>
           <select id="partSelect"></select>
         </label>
         <label class="inline">
-          Snap
+          <span data-i18n="ed_snap">الالتقاط</span>
           <select id="snap">
-            <option value="0" selected>Off</option>
+            <option value="0" selected data-i18n="ed_snap_off">متوقف</option>
             <option value="120">1/32</option>
             <option value="240">1/16</option>
             <option value="480">1/8</option>
@@ -149,25 +162,23 @@
             <option value="1920">1/2</option>
           </select>
         </label>
-        <label class="check" title="Scroll the roll to follow the playhead">
-          <input type="checkbox" id="followPlay" checked /> Follow
+        <label class="check" data-i18n-title="ed_follow" title="تتبع">
+          <input type="checkbox" id="followPlay" checked /> <span data-i18n="ed_follow">تتبع</span>
         </label>
-        <button class="btn btn-ghost btn-sm" id="btnFit">Fit</button>
+        <button class="btn btn-ghost btn-sm" id="btnFit" data-i18n="ed_fit">ملاءمة</button>
         <span class="grow"></span>
-        <span class="counter" id="editCount">No pending edits</span>
-        <button class="btn btn-ghost btn-sm" id="btnRevert" disabled>Revert</button>
+        <span class="counter" id="editCount" data-i18n="ed_no_pending">لا تعديلات معلقة</span>
+        <button class="btn btn-ghost btn-sm" id="btnRevert" disabled data-i18n="ed_revert">تراجع</button>
       </div>
 
       <div class="roll-wrap">
         <canvas id="roll" class="roll"></canvas>
         <canvas id="velane" class="velane"></canvas>
-        <div class="roll-empty" id="rollEmpty">This part has no notes.</div>
+        <div class="roll-empty" id="rollEmpty" data-i18n="roll_empty">لا نوتات في هذا الصوت.</div>
       </div>
 
-      <p class="hint hint-daw">
-        Drag a bar in the lane to set velocity &middot; drag a note up or down to retune
-        &middot; drag its right edge to change length &middot; click empty space and drag to pan
-        &middot; wheel to zoom, shift+wheel for height &middot; double-click to seek
+      <p class="hint hint-daw" data-i18n="hint_daw">
+        اسحب شريطاً في المسار لضبط السرعة · اسحب النوتة للأعلى أو الأسفل لتغيير النغمة · اسحب حافتها اليمنى لتغيير الطول · انقر مساحة فارغة واسحب للتحريك · العجلة للتقريب، مع Shift للارتفاع · نقرة مزدوجة للانتقال
       </p>
 
       <!-- Numeric fields below are type="text" with inputmode="numeric", not
@@ -179,66 +190,66 @@
            nothing was lost by not using the number type. -->
       <div class="ops" role="group" aria-label="Velocity operations">
         <div class="ops-row">
-          <span class="ops-label">Set</span>
+          <span class="ops-label" data-i18n="ops_set">ضبط</span>
           <div class="preset">
-            <button class="chip" data-v="127">127 loud</button>
+            <button class="chip" data-v="127" data-i18n="chip_127">127 عالٍ</button>
             <button class="chip" data-v="110">110</button>
-            <button class="chip" data-v="100">100 default</button>
-            <button class="chip" data-v="80">80 soft</button>
-            <button class="chip" data-v="40">40 ghost</button>
+            <button class="chip" data-v="100" data-i18n="chip_100">100 الافتراضي</button>
+            <button class="chip" data-v="80" data-i18n="chip_80">80 هادئ</button>
+            <button class="chip" data-v="40" data-i18n="chip_40">40 خافت</button>
           </div>
           <label class="inline">
             <input type="range" id="velocity" min="1" max="127" value="100" />
             <output id="velocityOut">100</output>
           </label>
-          <button class="btn btn-sm" id="btnApplySet">Apply to part</button>
+          <button class="btn btn-sm" id="btnApplySet" data-i18n="apply_to_part">تطبيق على الصوت</button>
         </div>
 
         <div class="ops-row">
-          <span class="ops-label">Scale</span>
+          <span class="ops-label" data-i18n="ops_scale">مقياس</span>
           <label class="inline">% <input type="text" inputmode="numeric" id="opScale" value="115" /></label>
-          <button class="btn btn-sm" data-op="scale">Run</button>
+          <button class="btn btn-sm" data-op="scale" data-i18n="run_btn">تنفيذ</button>
 
-          <span class="ops-label">Offset</span>
+          <span class="ops-label" data-i18n="ops_offset">إزاحة</span>
           <label class="inline">&plusmn; <input type="text" inputmode="numeric" id="opOffset" value="10" /></label>
-          <button class="btn btn-sm" data-op="offset">Run</button>
+          <button class="btn btn-sm" data-op="offset" data-i18n="run_btn">تنفيذ</button>
         </div>
 
         <div class="ops-row">
-          <span class="ops-label">Humanize</span>
+          <span class="ops-label" data-i18n="ops_humanize">بشرنة</span>
           <label class="inline">&plusmn; <input type="text" inputmode="numeric" id="opHuman" value="12" /></label>
-          <button class="btn btn-sm" data-op="humanize">Run</button>
+          <button class="btn btn-sm" data-op="humanize" data-i18n="run_btn">تنفيذ</button>
 
-          <span class="ops-label">Random</span>
+          <span class="ops-label" data-i18n="ops_random">عشوائي</span>
           <label class="inline">
             <input type="text" inputmode="numeric" id="opRandLow" value="70" />
-            to
+            <span data-i18n="to_word">إلى</span>
             <input type="text" inputmode="numeric" id="opRandHigh" value="110" />
           </label>
-          <button class="btn btn-sm" data-op="random">Run</button>
+          <button class="btn btn-sm" data-op="random" data-i18n="run_btn">تنفيذ</button>
         </div>
 
         <div class="ops-row">
-          <span class="ops-label">Curve</span>
+          <span class="ops-label" data-i18n="ops_curve">منحنى</span>
           <label class="inline">
-            pivot <input type="text" inputmode="decimal" id="opCurvePivot" value="0.5" />
+            <span data-i18n="pivot_word">المحور</span> <input type="text" inputmode="decimal" id="opCurvePivot" value="0.5" />
           </label>
           <label class="inline">
-            before <input type="text" inputmode="numeric" id="opCurveBelow" value="6" />
+            <span data-i18n="before_word">قبل</span> <input type="text" inputmode="numeric" id="opCurveBelow" value="6" />
           </label>
           <label class="inline">
-            after <input type="text" inputmode="numeric" id="opCurveAbove" value="-6" />
+            <span data-i18n="after_word">بعد</span> <input type="text" inputmode="numeric" id="opCurveAbove" value="-6" />
           </label>
-          <button class="btn btn-sm" data-op="curve">Run</button>
+          <button class="btn btn-sm" data-op="curve" data-i18n="run_btn">تنفيذ</button>
 
-          <span class="ops-label">Accent</span>
+          <span class="ops-label" data-i18n="ops_accent">تأكيد</span>
           <label class="inline">
-            above <input type="text" inputmode="numeric" id="opAccentAbove" value="100" />
+            <span data-i18n="above_word">فوق</span> <input type="text" inputmode="numeric" id="opAccentAbove" value="100" />
           </label>
           <label class="inline">
-            by <input type="text" inputmode="numeric" id="opAccentBy" value="12" />
+            <span data-i18n="by_word">بمقدار</span> <input type="text" inputmode="numeric" id="opAccentBy" value="12" />
           </label>
-          <button class="btn btn-sm" data-op="accent">Run</button>
+          <button class="btn btn-sm" data-op="accent" data-i18n="run_btn">تنفيذ</button>
         </div>
       </div>
       <div class="summary" id="summary"></div>
@@ -247,7 +258,7 @@
     <!-- Timeline -->
     <div class="block" id="blockTimeline">
       <div class="block-head">
-        <h2>Timeline</h2>
+        <h2 data-i18n="tl_title">الخط الزمني</h2>
         <span class="hint" id="timelineHint"></span>
       </div>
       <div class="timeline" id="timeline"></div>
@@ -256,8 +267,8 @@
     <!-- Voices -->
     <div class="block">
       <div class="block-head">
-        <h2>Parts</h2>
-        <span class="hint">Click a row to include or exclude it from playback and from the bulk operations</span>
+        <h2 data-i18n="parts_title">الأصوات</h2>
+        <span class="hint" data-i18n="parts_hint">انقر الصف لتضمينه أو استبعاده من التشغيل والعمليات الجماعية</span>
       </div>
       <div class="voices" id="voices"></div>
     </div>
@@ -265,28 +276,28 @@
     <!-- Save -->
     <div class="block">
       <div class="block-head">
-        <h2>Save</h2>
-        <span class="hint" id="saveHint">Your original file is never modified</span>
+        <h2 data-i18n="save_title">حفظ</h2>
+        <span class="hint" id="saveHint" data-i18n="save_hint_default">ملفك الأصلي لا يُمس أبداً</span>
       </div>
       <div class="actions">
-        <button class="btn" id="btnDownload" disabled>Download edited .STY</button>
-        <button class="btn btn-ghost" id="btnDownloadOrig" disabled>Download original</button>
+        <button class="btn" id="btnDownload" disabled data-i18n="download_edited">تنزيل .STY المعدّل</button>
+        <button class="btn btn-ghost" id="btnDownloadOrig" disabled data-i18n="download_original">تنزيل الأصل</button>
       </div>
       <div class="actions">
-        <button class="btn btn-ghost btn-sm" id="btnCopyMap">Copy the map as text</button>
+        <button class="btn btn-ghost btn-sm" id="btnCopyMap" data-i18n="copy_map">نسخ الخريطة كنص</button>
       </div>
     </div>
 
     <!-- Selection range -->
     <div class="block">
       <div class="block-head">
-        <h2>Selection</h2>
-        <span class="hint">Narrows the note operations and the download to a pitch range</span>
+        <h2 data-i18n="sel_title">التحديد</h2>
+        <span class="hint" data-i18n="sel_hint">يضيّق عمليات النوتات والتنزيل على مدى نغمي</span>
       </div>
       <div class="field narrow">
-        <label for="noteLow">Lowest pitch</label>
+        <label for="noteLow" data-i18n="lowest_pitch">أخفض نغمة</label>
         <select id="noteLow"></select>
-        <label for="noteHigh">Highest pitch</label>
+        <label for="noteHigh" data-i18n="highest_pitch">أعلى نغمة</label>
         <select id="noteHigh"></select>
       </div>
     </div>
@@ -294,17 +305,17 @@
     <!-- Presets -->
     <div class="block">
       <div class="block-head">
-        <h2>Presets</h2>
-        <span class="hint">Stored in this browser only, never uploaded</span>
+        <h2 data-i18n="presets_title">الإعدادات المسبقة</h2>
+        <span class="hint" data-i18n="presets_hint">تُحفظ في هذا المتصفح فقط، ولا تُرفع أبداً</span>
       </div>
       <div class="row">
-        <input type="text" id="presetName" placeholder="Preset name" maxlength="40" />
-        <button class="btn btn-sm" id="btnPresetSave">Save current</button>
+        <input type="text" id="presetName" placeholder="Preset name" data-i18n-ph="preset_name_ph" maxlength="40" />
+        <button class="btn btn-sm" id="btnPresetSave" data-i18n="preset_save">حفظ الحالي</button>
       </div>
       <div class="presets" id="presetList"></div>
       <div class="actions">
-        <button class="btn btn-ghost btn-sm" id="btnJsonExport">Export edits as JSON</button>
-        <button class="btn btn-ghost btn-sm" id="btnJsonImport">Import JSON</button>
+        <button class="btn btn-ghost btn-sm" id="btnJsonExport" data-i18n="export_json">تصدير التعديلات JSON</button>
+        <button class="btn btn-ghost btn-sm" id="btnJsonImport" data-i18n="import_json">استيراد JSON</button>
         <input type="file" id="jsonFile" accept=".json,application/json" hidden />
       </div>
     </div>
@@ -312,7 +323,7 @@
     <!-- Declared structure -->
     <div class="block" id="blockDeclared">
       <div class="block-head">
-        <h2>Declared sections</h2>
+        <h2 data-i18n="declared_title">الأقسام المعلنة</h2>
         <span class="hint" id="declaredHint"></span>
       </div>
       <div class="declared" id="declared"></div>
